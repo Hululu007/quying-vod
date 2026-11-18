@@ -29,4 +29,5 @@ while getopts "p:h" opt; do
 done
 
 export PORT
+export PUBLIC_URL="${PUBLIC_URL:-https://qw2y3rnk6x.coze.site}"
 python app.py

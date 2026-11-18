@@ -18,7 +18,8 @@
 - `/vod`（含别名 `/api.php/provide/vod`、`/`）：列表/搜索/详情，`ac=list|detail`、`t` 分类（1/2/3/4/5 主源，4k/6k/4k-movie 等 4K站）、`wd` 搜索、`ids` 详情；`4kcz-数字ID` 走 4K站
 - `/play.m3u8`、`/resolve`、`/4kcz/play`：播放地址实时解析
 - `/tvbox.json`、`/collector/status`、`/health`：TVBox 配置、采集状态、健康检查
-- 采集器：启动时 `start_collector()`（后台线程），按 `COLLECT_INTERVAL_SECONDS`（默认 86400）刷新快照；配置项见 README（`DYRS_BASE_URL`、`FOURKCZ_BASE_URL`、`COLLECT_CACHE_FILE`、`COLLECT_S3_*`、`PUBLIC_URL`、`HOST`/`PORT` 等）
+- 采集器：启动时 `start_collector()`（后台线程），按 `COLLECT_INTERVAL_SECONDS`（默认 86400）刷新快照；配置项见 README（`DYRS_BASE_URL`、`FOURKCZ_BASE_URL`、`COLLECT_CACHE_FILE`、`COLLECT_S3_*`、`HOST`/`PORT` 等）
+- 对外域名：部署时 `scripts/http_run.sh` 默认注入 `PUBLIC_URL=https://qw2y3rnk6x.coze.site`（`tvbox.json` 的 api 与播放链接基于它生成），外部环境变量可覆盖；本地未设置时 fallback 请求 Host
 - 快照备份：`save_collection` 后按 `COLLECT_S3_BACKUP_INTERVAL_SECONDS`（默认 300s）节流上传到平台对象存储（`COZE_BUCKET_*` 环境变量 + SDK 预装包 `coze_coding_dev_sdk`）；本地快照缺失时 `load_collection` 从对象存储恢复。备份失败仅记日志、不打断本地流程。**不接数据库**（单 JSON 快照无实体关系，对象存储已覆盖持久化）
 
 ## 运行与预览
