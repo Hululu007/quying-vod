@@ -11,7 +11,8 @@
 - `test_app.py`：unittest 单测（9 个用例，mock fetch/fetch_source）
 - `vod_collection.json`：每日采集的本地快照（gitignore，不入库）
 - `scripts/setup.sh` / `scripts/http_run.sh`：部署用的安装/启动包装（dyrs-vod 子目录）
-- `.coze`（根 + dyrs-vod 子目录）：`[subprojects].path = ["dyrs-vod"]`，多层结构
+- `.coze`：**根 `.coze` 在工作区根 `/workspace/projects/.coze`**（平台唯一入口），`[subprojects].path = ["projects/dyrs-vod"]`；子项目 `.coze` 在 `projects/dyrs-vod/.coze`（含 `sub_id`/`name`/`project_type`），多层结构
+- 工作区根 = `/workspace/projects`（git 根），技术项目根 = `/workspace/projects/projects/dyrs-vod`
 
 ## 关键入口 / 核心模块
 - `/vod`（含别名 `/api.php/provide/vod`、`/`）：列表/搜索/详情，`ac=list|detail`、`t` 分类（1/2/3/4/5 主源，4k/6k/4k-movie 等 4K站）、`wd` 搜索、`ids` 详情；`4kcz-数字ID` 走 4K站
@@ -22,7 +23,7 @@
 
 ## 运行与预览
 - `project_type = "backend"`：`preview_enable = "disabled"`，无预览链路
-- 本地验证：`cd dyrs-vod && uv pip install --python .venv/bin/python -r requirements.txt && COLLECT_CACHE_FILE=/tmp/empty_collection.json COLLECT_S3_BACKUP=0 .venv/bin/python -m unittest test_app`（`COLLECT_S3_BACKUP=0` 防止测试触发真实对象存储调用；`coze_coding_dev_sdk` 在系统 Python 的 dist-packages，venv 不安装）
+- 本地验证：`cd dyrs-vod && uv pip install --python .venv/bin/python -r requirements.txt && COLLECT_CACHE_FILE=/tmp/empty_collection.json COLLECT_S3_BACKUP=0 .venv/bin/python -m unittest test_app`（`COLLECT_S3_BACKUP=0` 防止测试触发真实对象存储调用；`coze_coding_dev_sdk` 在系统 Python 的 dist-packages，venv 不安装）。uv 为 `--user` 安装（`~/.local/bin`），使用前 `export PATH="$HOME/.local/bin:$PATH"`
 - 手动起服务：`.venv/bin/python app.py`（默认 `0.0.0.0:9978`，`PORT` 环境变量可改）；部署时固定端口 5000（`scripts/http_run.sh -p 5000`）
 - 部署：`[deploy]` 指向 `scripts/setup.sh`（pip 安装 requirements.txt）与 `scripts/http_run.sh`，脚本内部按自身位置 fallback 回 dyrs-vod 根目录执行
 
