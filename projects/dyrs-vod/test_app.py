@@ -38,7 +38,8 @@ class AdapterTests(unittest.TestCase):
             fetch.assert_not_called()
 
     def test_upstream_failure_is_json(self):
-        with patch.object(service, 'fetch', side_effect=service.UpstreamError('source unavailable')):
+        with patch.object(service, 'fetch', side_effect=service.UpstreamError('source unavailable')), patch.object(
+                service, 'fetch_source', side_effect=service.UpstreamError('backup unavailable')):
             r = self.client.get('/vod')
         self.assertEqual(r.status_code, 502)
         self.assertEqual(r.get_json()['code'], 0)

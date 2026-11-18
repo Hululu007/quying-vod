@@ -44,13 +44,16 @@ TVBox 配置：`GET /tvbox.json`。
 - `COLLECT_INTERVAL_SECONDS`：采集间隔秒数，默认 `86400`（24 小时）
 - `COLLECT_MAX_PAGES`：每个分类每日采集页数，默认 `3`，最大 `20`
 - `COLLECT_DETAIL_LIMIT`：每个分类额外采集详情数，默认 `2`，设为 `0` 可关闭详情采集
+- `COLLECT_RETRY_SECONDS`：一轮采集出错或未跑完后的重试间隔，默认 `600`（10 分钟）
+- `UPSTREAM_RETRIES`：抓取超时/429/5xx 时的重试次数，默认 `2`
+- `UPSTREAM_RETRY_BACKOFF_SECONDS`：首次重试等待秒数，默认 `1`（之后按指数翻倍）
 - `COLLECT_CACHE_FILE`：本地 JSON 快照文件路径，默认项目目录下 `vod_collection.json`
 - `COLLECT_S3_BACKUP`：是否把采集快照备份到对象存储，默认 `1`（`COZE_BUCKET_NAME` 存在时）
 - `COLLECT_S3_PREFIX`：对象存储快照 key 前缀，默认 `dyrs-vod/collection`
 - `COLLECT_S3_BACKUP_INTERVAL_SECONDS`：两次 S3 备份最小间隔，默认 `300`
 - `HOST` / `PORT`：监听地址，默认 `0.0.0.0:9978`
 
-服务启动后会检查快照；首次启动或快照超过 24 小时时立即采集，之后每 24 小时运行一次。目录页和详情元数据保存在本地快照；播放地址仍在播放时实时解析。采集状态可通过 `GET /collector/status` 查看。
+服务启动后会检查快照；首次启动、快照未完整跑完或超过 24 小时时立即采集，之后每 24 小时运行一次；某一轮有抓取错误时按 `COLLECT_RETRY_SECONDS` 自动重试，不会把失败的一轮当成完整采集而空等一天。每个分类的列表落盘后会立刻补该分类的详情，重启后不必等全部列表跑完才出现选集数据。目录页和详情元数据保存在本地快照；播放地址仍在播放时实时解析。采集状态可通过 `GET /collector/status` 查看。
 
 本地快照会备份到对象存储（需平台注入 `COZE_BUCKET_NAME`/`COZE_BUCKET_ENDPOINT_URL`，SDK 由平台预装）。本地文件缺失或重置时自动从对象存储恢复，避免部署环境重启后全量重采；备份失败不影响本地主流程。项目不接入数据库：数据是单一 JSON 快照、无实体关系与用户体系，对象存储已覆盖其持久化需求。
 

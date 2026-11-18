@@ -7,7 +7,7 @@ import threading
 import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urljoin, urlsplit, urlunsplit
 
@@ -20,13 +20,29 @@ BASE = os.getenv('DYRS_BASE_URL', 'https://dyrs360.cc').rstrip('/')
 FOURKCZ_BASE = os.getenv('FOURKCZ_BASE_URL', 'https://www.4kcz.com').rstrip('/')
 SESSION_ID = os.getenv('DYRS_SION_ID', '6afc87d233c5e433b54ab53a')
 PUBLIC_URL = os.getenv('PUBLIC_URL', '').rstrip('/')
-DYRS_ALLOWED_HOSTS = {urlsplit(BASE).netloc}
-if urlsplit(BASE).netloc == 'dyrs360.cc':
-    DYRS_ALLOWED_HOSTS.add('kingtv.vip')
+
+
+def host_variants(host):
+    host = (host or '').lower()
+    if not host:
+        return set()
+    if re.fullmatch(r'[\d.]+', host):
+        return {host}
+    return {host, host[4:]} if host.startswith('www.') else {host, 'www.' + host}
+
+
+DYRS_ALLOWED_HOSTS = host_variants(urlsplit(BASE).hostname)
+if 'dyrs360.cc' in DYRS_ALLOWED_HOSTS:
+    DYRS_ALLOWED_HOSTS |= host_variants('kingtv.vip')
+FOURKCZ_ALLOWED_HOSTS = host_variants(urlsplit(FOURKCZ_BASE).hostname)
+UPSTREAM_RETRIES = min(5, max(0, int(os.getenv('UPSTREAM_RETRIES', '2'))))
+UPSTREAM_RETRY_BACKOFF = max(0.1, float(os.getenv('UPSTREAM_RETRY_BACKOFF_SECONDS', '1')))
+RETRYABLE_STATUS = frozenset((429, 500, 502, 503, 504))
 COLLECT_ENABLED = os.getenv('COLLECT_ENABLED', '1').lower() not in ('0', 'false', 'no')
 COLLECT_INTERVAL = max(3600, int(os.getenv('COLLECT_INTERVAL_SECONDS', '86400')))
 COLLECT_MAX_PAGES = min(20, max(1, int(os.getenv('COLLECT_MAX_PAGES', '3'))))
 COLLECT_DETAIL_LIMIT = min(10, max(0, int(os.getenv('COLLECT_DETAIL_LIMIT', '2'))))
+COLLECT_RETRY_SECONDS = max(60, int(os.getenv('COLLECT_RETRY_SECONDS', '600')))
 COLLECT_CACHE_FILE = Path(os.getenv(
     'COLLECT_CACHE_FILE', str(Path(__file__).with_name('vod_collection.json'))))
 COLLECT_S3_BACKUP = os.getenv(
@@ -111,6 +127,32 @@ def upstream_url(path, params=None):
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query, doseq=True), ''))
 
 
+def _request_text(url, headers, label, encoding='utf-8', allow_redirects=True, retries=None):
+    """读取上游页面；超时、429、5xx 按指数退避重试，其他状态码直接报错。"""
+    attempts = UPSTREAM_RETRIES if retries is None else max(0, retries)
+    delay = UPSTREAM_RETRY_BACKOFF
+    last_error = ''
+    for attempt in range(attempts + 1):
+        try:
+            with requests.get(url, headers=headers, timeout=(8, 20), allow_redirects=allow_redirects) as response:
+                status = response.status_code
+                if status in RETRYABLE_STATUS:
+                    last_error = f'{label}返回 HTTP {status}'
+                elif status != 200:
+                    raise UpstreamError(f'{label}返回 HTTP {status}')
+                else:
+                    response.encoding = encoding or response.apparent_encoding or 'utf-8'
+                    return response.url, response.text
+        except requests.RequestException as exc:
+            last_error = f'{label}请求失败或超时'
+        if attempt < attempts:
+            time.sleep(delay)
+            delay *= 2
+    if attempts:
+        last_error += f'（已重试 {attempts} 次）'
+    raise UpstreamError(last_error)
+
+
 def fetch(path, params=None, ttl=120):
     url = upstream_url(path, params)
     with cache_lock:
@@ -118,16 +160,9 @@ def fetch(path, params=None, ttl=120):
         if hit and hit[0] > time.monotonic():
             cache.move_to_end(url)
             return hit[1]
-    try:
-        with requests.get(url, headers=HEADERS, timeout=(8, 20), allow_redirects=True) as r:
-            if urlsplit(r.url).netloc not in DYRS_ALLOWED_HOSTS:
-                raise UpstreamError('源站跳转到了未配置的域名')
-            if r.status_code != 200:
-                raise UpstreamError(f'源站返回 HTTP {r.status_code}')
-            r.encoding = 'utf-8'
-            html = r.text
-    except requests.RequestException as exc:
-        raise UpstreamError('源站请求失败或超时，请稍后重试') from exc
+    final_url, html = _request_text(url, HEADERS, '源站')
+    if (urlsplit(final_url).hostname or '').lower() not in DYRS_ALLOWED_HOSTS:
+        raise UpstreamError('源站跳转到了未配置的域名')
     if '<html' not in html.lower():
         raise UpstreamError('源站未返回网页')
     if ttl:
@@ -157,16 +192,9 @@ def fetch_source(source, path, params=None, ttl=120):
         if hit and hit[0] > time.monotonic():
             cache.move_to_end(url)
             return hit[1]
-    try:
-        with requests.get(url, headers=headers, timeout=(8, 20), allow_redirects=True) as response:
-            if urlsplit(response.url).netloc != parts.netloc:
-                raise UpstreamError('4K站跳转到了未配置的域名')
-            if response.status_code != 200:
-                raise UpstreamError(f'4K站返回 HTTP {response.status_code}')
-            response.encoding = response.apparent_encoding or 'utf-8'
-            html = response.text
-    except requests.RequestException as exc:
-        raise UpstreamError('4K站请求失败或超时，请稍后重试') from exc
+    final_url, html = _request_text(url, headers, '4K站', encoding=None)
+    if (urlsplit(final_url).hostname or '').lower() not in FOURKCZ_ALLOWED_HOSTS:
+        raise UpstreamError('4K站跳转到了未配置的域名')
     if '<html' not in html.lower():
         raise UpstreamError('4K站未返回网页')
     if ttl:
@@ -386,12 +414,16 @@ def collect_listing(type_id, source, page, path, params=None, source_type=None):
 
 
 def collection_is_stale():
-    updated = collection_data.get('last_run_at') or collection_data.get('updated_at', '')
-    if not updated:
-        return True
+    """只有完整跑完的一轮才顺延到下一个采集周期；中断或出错按短间隔重试。"""
+    with collection_lock:
+        next_run = collection_data.get('next_run_at', '')
+        last_run = collection_data.get('last_run_at', '')
     try:
-        last_update = datetime.fromisoformat(updated)
-        return (datetime.now(timezone.utc) - last_update).total_seconds() >= COLLECT_INTERVAL
+        if next_run:
+            return datetime.now(timezone.utc) >= datetime.fromisoformat(next_run)
+        if not last_run:
+            return True
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(last_run)).total_seconds() >= COLLECT_INTERVAL
     except ValueError:
         return True
 
@@ -405,12 +437,26 @@ def collect_once():
     collected_counts = {}
     errors = []
     detail_ids = OrderedDict()
+    root = PUBLIC_URL or 'http://localhost:9978'
+
+    def collect_detail(vid):
+        try:
+            value = _fetch_detail(vid, root)
+            with collection_lock:
+                collection_data.setdefault('details', {})[vid] = {
+                    'root': root, 'value': value,
+                    'collected_at': datetime.now(timezone.utc).isoformat(),
+                }
+            save_collection()
+        except (UpstreamError, ValueError) as exc:
+            errors.append(f'{vid} 详情：{exc}')
+        collector_stop.wait(0.25)
 
     def collect_category(type_id, source, path, label, source_type=None, params_fn=None):
         page = 1
         page_count = 1
         count = 0
-        detail_count = 0
+        category_ids = []
         while page <= min(page_count, COLLECT_MAX_PAGES):
             page_path = path
             page_params = None
@@ -428,17 +474,22 @@ def collect_once():
                 page_count = value.get('pagecount') or 1
                 count += len(value.get('list', []))
                 for item in value.get('list', []):
-                    if detail_count >= COLLECT_DETAIL_LIMIT:
+                    if len(category_ids) >= COLLECT_DETAIL_LIMIT:
                         break
                     if item['vod_id'] not in detail_ids:
                         detail_ids[item['vod_id']] = source
-                        detail_count += 1
+                        category_ids.append(item['vod_id'])
             except (UpstreamError, ValueError) as exc:
                 errors.append(f'{label} 第{page}页：{exc}')
                 break
             page += 1
             collector_stop.wait(0.25)
         collected_counts[label] = count
+        # 该分类列表落盘后立刻补详情，重启后不必等全部列表跑完才有选集数据
+        for vid in category_ids:
+            if collector_stop.is_set():
+                break
+            collect_detail(vid)
 
     try:
         for type_id, name, slug in CATEGORIES:
@@ -449,27 +500,19 @@ def collect_once():
             if collector_stop.is_set():
                 break
             collect_category(type_id, '4kcz', path, name, (type_id, name))
-        root = PUBLIC_URL or 'http://localhost:9978'
-        if not collector_stop.is_set():
-            for vid, source in detail_ids.items():
-                try:
-                    detail_value = detail(vid, root)
-                    with collection_lock:
-                        collection_data.setdefault('details', {})[vid] = {
-                            'root': root, 'value': detail_value,
-                            'collected_at': datetime.now(timezone.utc).isoformat(),
-                        }
-                    save_collection()
-                except (UpstreamError, ValueError) as exc:
-                    errors.append(f'{vid} 详情：{exc}')
-                collector_stop.wait(0.25)
         save_collection()
     finally:
-        finished_at = datetime.now(timezone.utc).isoformat()
+        finished = datetime.now(timezone.utc)
+        finished_at = finished.isoformat()
+        complete = not errors and not collector_stop.is_set()
         with collection_lock:
-            collection_data['last_run_at'] = finished_at
+            if complete:
+                collection_data['last_run_at'] = finished_at
+                collection_data['next_run_at'] = (finished + timedelta(seconds=COLLECT_INTERVAL)).isoformat()
+            else:
+                collection_data['next_run_at'] = (finished + timedelta(seconds=COLLECT_RETRY_SECONDS)).isoformat()
             collection_status.update(running=False, last_finished=finished_at,
-                                     last_success=bool(collected_counts) and not errors,
+                                     last_success=complete,
                                      last_counts=collected_counts, last_errors=errors[:30])
         save_collection()
     return not errors
@@ -480,7 +523,8 @@ def collector_loop():
     while not collector_stop.is_set():
         if collection_is_stale():
             collect_once()
-        collector_stop.wait(COLLECT_INTERVAL)
+        # 轮询而非直接睡满周期，失败后才能在 COLLECT_RETRY_SECONDS 内自动重试
+        collector_stop.wait(60)
 
 
 def start_collector():
@@ -624,6 +668,14 @@ def _fetch_detail(vid, public_url):
             'unavailable_lines': failures}
 
 
+def _rebased_detail(cached, public_url):
+    value = cached.get('value', {})
+    old_root = cached.get('root', '')
+    if old_root and old_root != public_url:
+        value['vod_play_url'] = value.get('vod_play_url', '').replace(old_root, public_url)
+    return value
+
+
 def detail(vid, public_url):
     with collection_lock:
         cached = copy.deepcopy(collection_data.get('details', {}).get(vid))
@@ -634,12 +686,14 @@ def detail(vid, public_url):
         except ValueError:
             age = float('inf')
         if age < max(COLLECT_INTERVAL, 86400):
-            value = cached.get('value', {})
-            old_root = cached.get('root', '')
-            if old_root and old_root != public_url:
-                value['vod_play_url'] = value.get('vod_play_url', '').replace(old_root, public_url)
-            return value
-    value = _fetch_detail(vid, public_url)
+            return _rebased_detail(cached, public_url)
+    try:
+        value = _fetch_detail(vid, public_url)
+    except UpstreamError:
+        if cached:
+            # 上游超时/限流时回退到旧快照，避免详情接口直接 502、客户端选集为空
+            return _rebased_detail(cached, public_url)
+        raise
     with collection_lock:
         collection_data.setdefault('details', {})[vid] = {
             'root': public_url, 'value': copy.deepcopy(value),
@@ -792,7 +846,6 @@ def vod():
 
 @app.get('/4kcz/play')
 def play_4kcz():
-    request_get = requests.get
     target = request.args.get('url', '')
     parts = urlsplit(target)
     if parts.scheme != 'https' or parts.netloc != urlsplit(FOURKCZ_BASE).netloc or not FOURKCZ_EPISODE_RE.fullmatch(parts.path):
@@ -807,13 +860,8 @@ def play_4kcz():
     if player_parts.scheme != 'https' or not player_parts.hostname or not any(
             trusted_host(player_parts.hostname, domain) for domain in ('py1080p.com', '4kcz.com')):
         raise UpstreamError('4K站播放器地址无效')
-    try:
-        with request_get(player_url, headers=FOURKCZ_HEADERS, timeout=(8, 20), allow_redirects=False) as response:
-            if response.status_code != 200:
-                raise UpstreamError(f'4K站播放器返回 HTTP {response.status_code}')
-            player_html = response.text
-    except requests.RequestException as exc:
-        raise UpstreamError('4K站播放器请求失败或超时') from exc
+    _, player_html = _request_text(player_url, FOURKCZ_HEADERS, '4K站播放器',
+                                   allow_redirects=False, retries=1)
     media = re.search(r"\b(?:const|let|var)\s+mysvg\s*=\s*(['\"])(https?://.+?)\1\s*;", player_html)
     if not media:
         media = re.search(r"\bart\.url\s*=\s*(['\"])(https?://.+?)\1\s*;", player_html)
