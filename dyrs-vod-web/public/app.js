@@ -64,7 +64,7 @@
       if (k === 'class') e.className = attrs[k];
       else if (k === 'html') e.innerHTML = attrs[k];
       else if (k.startsWith('on') && typeof attrs[k] === 'function') e.addEventListener(k.slice(2), attrs[k]);
-      else if (attrs[k] != null) e.setAttribute(k, attrs[k]);
+      else if (attrs[k] != null && attrs[k] !== false) e.setAttribute(k, attrs[k]);
     }
     (Array.isArray(children) ? children : [children]).forEach((c) => {
       if (c == null || c === false) return;
