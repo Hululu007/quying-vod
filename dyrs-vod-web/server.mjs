@@ -1397,7 +1397,8 @@ async function handleAdmin(req, res, p, url) {
   }
 }
 
-const server = http.createServer(async (req, res) => {
+// 请求处理器：既供本地 http.createServer 使用，也作为 Vercel Serverless 函数入口导出
+export async function requestHandler(req, res) {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
@@ -1651,16 +1652,21 @@ const server = http.createServer(async (req, res) => {
     }
     serveFile(res, filePath);
   });
-});
+}
+
+const server = http.createServer(requestHandler);
 
 server.on('error', (e) => {
   console.error('[quying] server error:', (e && e.message) || e);
   process.exit(1);
 });
 
-server.listen(PORT, HOST, () => {
-  console.log(`[quying] listening on http://${HOST}:${PORT}`);
-});
+// Vercel 等 Serverless 环境由平台调用 requestHandler，不需要自己监听端口
+if (!process.env.VERCEL) {
+  server.listen(PORT, HOST, () => {
+    console.log(`[quying] listening on http://${HOST}:${PORT}`);
+  });
+}
 
 process.on('uncaughtException', (e) => {
   console.error('[quying] uncaughtException:', (e && e.message) || e);

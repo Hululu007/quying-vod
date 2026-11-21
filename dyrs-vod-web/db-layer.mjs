@@ -60,6 +60,7 @@ export async function initStores({ initialPassword, moduleDir } = {}) {
   let databasePath = preferred;
   try {
     fs.mkdirSync(path.dirname(preferred), { recursive: true });
+    fs.accessSync(path.dirname(preferred), fs.constants.W_OK);
     databasePath = preferred;
   } catch {
     databasePath = path.join(os.tmpdir(), 'quying', 'catalog.db');
