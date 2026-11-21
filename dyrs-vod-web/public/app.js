@@ -10,9 +10,6 @@
   const CATEGORIES = [
     { group: '分类', items: [
       { t: '', name: '全部', color: 'var(--accent)' },
-      { t: 'new', name: '最新', color: '#22d3ee' },
-      { t: 'hot', name: '最热', color: '#f97316' },
-      { t: 'score', name: '高分推荐', color: '#eab308' },
       { t: '1', name: '电影', color: '#4a9eff', subs: [
         { t: 21, name: '动作' }, { t: 22, name: '喜剧' }, { t: 23, name: '恐怖' },
         { t: 24, name: '科幻' }, { t: 25, name: '爱情' }, { t: 26, name: '剧情' },
@@ -42,6 +39,13 @@
         { t: 56, name: '网球' }, { t: 57, name: '斯诺克' },
       ]},
     ]},
+  ];
+
+  // 榜单（排序）不是一级分类，单独展示在年份筛选下面。
+  const RANKS = [
+    { t: 'new', name: '最新' },
+    { t: 'hot', name: '最热' },
+    { t: 'score', name: '高分推荐' },
   ];
 
   const YEARS = [
@@ -86,7 +90,12 @@
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), opts.timeout || 30000);
     try {
-      const res = await fetch(path, { headers: { Accept: 'application/json' }, signal: controller.signal });
+      const res = await fetch(path, {
+      method: opts.method || 'GET',
+      headers: { Accept: 'application/json', ...(opts.body ? { 'Content-Type': 'application/json' } : {}) },
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+      signal: controller.signal,
+    });
       const text = await res.text();
       let data = null;
       try { data = JSON.parse(text); } catch { /* non-json */ }
@@ -253,6 +262,7 @@
       clear(host);
       host.appendChild(categoryNav());
       host.appendChild(yearPills());
+      host.appendChild(rankPills());
     }
     const hint = document.getElementById('filterHint');
     if (hint) hint.textContent = filterSummary();
@@ -262,6 +272,8 @@
   function categoryLabel(t) {
     const s = String(t || '');
     if (!s) return '全部';
+    const rank = RANKS.find((r) => r.t === s);
+    if (rank) return rank.name;
     const top = PRIMARY.find((c) => String(c.t) === s);
     if (top) return top.name;
     for (const c of PRIMARY) {
@@ -399,6 +411,19 @@
     return el('div', { class: 'year-row' }, [row]);
   }
 
+  // 榜单行：位于年份筛选下方，不是一级分类；再点一次可取消榜单回到全部。
+  function rankPills() {
+    const row = el('div', { class: 'pills rank-pills' });
+    RANKS.forEach((r) => {
+      row.appendChild(el('button', {
+        class: 'pill' + (state.t === r.t ? ' active' : ''),
+        'data-rank': r.t,
+        onclick: () => selectCategory(state.t === r.t ? '' : r.t),
+      }, r.name));
+    });
+    return el('div', { class: 'year-row rank-row' }, [row]);
+  }
+
   function setYear(y) {
     state.year = y;
     state.pg = 1;
@@ -430,7 +455,7 @@
         el('span', { class: 'cat-panel-title' }, '片库'),
         el('span', { class: 'filter-hint', id: 'filterHint' }, filterSummary()),
       ]),
-      el('div', { id: 'catNavHost' }, [categoryNav(), yearPills()]),
+      el('div', { id: 'catNavHost' }, [categoryNav(), yearPills(), rankPills()]),
     ]));
 
     const listWrap = el('div', { id: 'listWrap' });
@@ -540,6 +565,112 @@
     }
   }
 
+  // ---- 浏览历史（仅浏览器本地，供「猜你喜欢」使用） ----
+  const HISTORY_KEY = 'qy_history';
+  function historyIds(limit = 20) {
+    try {
+      const list = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+      return Array.isArray(list) ? list.slice(0, limit) : [];
+    } catch { return []; }
+  }
+  function rememberHistory(id) {
+    const key = String(id || '');
+    if (!/^(?:\d{1,10}|4kcz-\d{1,8})$/.test(key)) return;
+    try {
+      const list = historyIds(20).filter((x) => x !== key);
+      list.unshift(key);
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(list.slice(0, 20)));
+    } catch { /* 隐私模式下写入失败可忽略 */ }
+  }
+
+  // ---- 创意频道 ----
+  function renderChannels() {
+    clear(app);
+    app.appendChild(el('section', { class: 'hero' }, [
+      el('h2', {}, '创意频道'),
+      el('p', {}, '把好片整理成一个个可逛的主题空间：榜单、系列、演员与国漫，按规则精挑细选，点开就有方向。'),
+    ]));
+    const wrap = el('div', { id: 'channelWrap' });
+    app.appendChild(wrap);
+    wrap.appendChild(spinner());
+    api('/api/vod/channels').then((data) => {
+      clear(wrap);
+      const grid = el('div', { class: 'channel-grid' });
+      (Array.isArray(data.list) ? data.list : []).forEach((c) => {
+        grid.appendChild(el('div', { class: 'channel-card', onclick: () => openChannel(c) }, [
+          el('div', { class: 'channel-icon' }, c.icon || '🎬'),
+          el('div', { class: 'channel-name' }, c.name),
+          el('div', { class: 'channel-desc' }, c.desc || ''),
+          el('div', { class: 'channel-more' }, '进入频道 →'),
+        ]));
+      });
+      wrap.appendChild(grid);
+    }).catch((e) => {
+      clear(wrap);
+      wrap.appendChild(banner('warn', `频道加载失败：${e.message}`));
+    });
+  }
+
+  function openChannel(c, pg = 1) {
+    clear(app);
+    const hint = el('span', { class: 'filter-hint' });
+    app.appendChild(el('div', { class: 'channel-detail-head' }, [
+      el('button', { class: 'btn ghost', onclick: renderChannels }, '← 全部频道'),
+      el('div', { class: 'channel-detail-title' }, [
+        el('span', { class: 'channel-icon' }, c.icon || '🎬'),
+        el('div', {}, [
+          el('h2', {}, c.name),
+          el('p', {}, c.desc || ''),
+          hint,
+        ]),
+      ]),
+    ]));
+    const wrap = el('div', {});
+    app.appendChild(wrap);
+    loadChannelInto(c, pg, wrap, hint);
+  }
+
+  async function loadChannelInto(c, pg, wrap, hint) {
+    clear(wrap);
+    wrap.appendChild(spinner('频道片源加载中…（首次采集约 10–20 秒）'));
+    try {
+      const isGuess = c.id === 'guess';
+      const opts = isGuess
+        ? { method: 'POST', body: { seeds: historyIds(5), exclude: historyIds(20) } }
+        : {};
+      const data = await api(`/api/vod/channel?id=${encodeURIComponent(c.id)}&pg=${pg}`, opts);
+      const list = Array.isArray(data.list) ? data.list : [];
+      if (hint && isGuess) {
+        hint.textContent = data.channel && data.channel.personalized
+          ? '已根据你的浏览记录个性化推荐'
+          : '暂无浏览记录，先为你推荐口碑榜；点开几部影片后再来看看';
+      }
+      clear(wrap);
+      if (!list.length) {
+        wrap.appendChild(el('div', { class: 'empty' }, '该频道暂无片源，稍后再来看看'));
+        return;
+      }
+      const grid = el('div', { class: 'grid' });
+      list.forEach((it) => grid.appendChild(card(it)));
+      wrap.appendChild(grid);
+      const page = Number(data.page) || 1;
+      const pageCount = Number(data.pagecount) || 1;
+      if (pageCount > 1) {
+        wrap.appendChild(el('div', { class: 'pager' }, [
+          page > 1 ? el('button', { class: 'btn ghost', onclick: () => openChannel(c, page - 1) }, '上一页') : null,
+          el('span', { class: 'page-info' }, `${page} / ${pageCount}`),
+          page < pageCount ? el('button', { class: 'btn ghost', onclick: () => openChannel(c, page + 1) }, '下一页') : null,
+        ].filter(Boolean)));
+      }
+    } catch (e) {
+      clear(wrap);
+      wrap.appendChild(banner('warn', `频道加载失败：${e.message}`));
+      wrap.appendChild(el('div', { class: 'empty' }, [
+        el('button', { class: 'btn', onclick: () => openChannel(c, pg) }, '重试'),
+      ]));
+    }
+  }
+
   // ---- detail modal ----
   function parsePlaySources(detail) {
     const from = String(detail.vod_play_from || '');
@@ -564,6 +695,7 @@
       const data = await api(`/api/vod/detail?ids=${encodeURIComponent(vodId)}`);
       const d = (Array.isArray(data.list) && data.list[0]) || data;
       renderModal(d);
+      rememberHistory(vodId);
     } catch (e) {
       clear(modalCard);
       modalCard.appendChild(el('div', { style: 'padding:40px' }, [banner('err', `详情加载失败：${e.message}`)]));
@@ -655,6 +787,9 @@
       ['GET', '/api/vod/list', '影片列表', 'pg（页码）、t（分类，见下方）、year（可选）'],
       ['GET', '/api/vod/search', '搜索', 'wd（关键词）'],
       ['GET', '/api/vod/detail', '影片详情', 'ids（影片 ID）'],
+      ['GET', '/api/vod/channels', '创意频道清单', '—'],
+      ['GET/POST', '/api/vod/channel', '频道片源（候选池快照分页）', 'id（频道 ID）、pg；id=guess 时 POST {seeds, exclude}'],
+      ['GET', '/play.m3u8', '播放地址解析', 'id（影片 ID）、p（集序号，从 0 开始）'],
     ];
     const table = el('table', { class: 'docs' }, [
       el('thead', {}, [el('tr', {}, ['方法', '路径', '说明', '参数'].map((h) => el('th', {}, h)))]),
@@ -664,7 +799,11 @@
     app.appendChild(panel1);
 
     const catRows = [];
-    CATEGORIES.forEach((grp) => grp.items.forEach((c) => catRows.push([grp.group, c.name, c.t || '（空）'])));
+    CATEGORIES.forEach((grp) => grp.items.forEach((c) => {
+      catRows.push([grp.group, c.name, c.t || '（空）']);
+      (c.subs || []).forEach((s) => catRows.push([`${grp.group} · ${c.name}`, s.name, String(s.t)]));
+    }));
+    RANKS.forEach((r) => catRows.push(['榜单（排序，非一级分类）', r.name, r.t]));
     const catTable = el('table', { class: 'docs' }, [
       el('thead', {}, [el('tr', {}, ['分组', '名称', 't 值'].map((h) => el('th', {}, h)))]),
       el('tbody', {}, catRows.map((r) => el('tr', {}, r.map((c) => el('td', {}, c))))),
@@ -675,6 +814,12 @@
       el('h3', {}, '说明'),
       el('p', { style: 'font-size:13px;color:var(--text-dim);line-height:1.8' },
         '数据来自公开影视元数据接口，本站不存储影片文件。播放地址为短时有效的 m3u8，访问 /play.m3u8 时实时解析。'),
+      el('p', { style: 'font-size:13px;color:var(--text-dim);line-height:1.8' },
+        '榜单参数：t=new 最新（按更新时间）、t=hot 最热（按点击量）、t=score 高分推荐（按评分），均可与 year 组合使用；它们也出现在 TVBox 的分类（class）中。'),
+      el('p', { style: 'font-size:13px;color:var(--text-dim);line-height:1.8' },
+        '播放源：详情 vod_play_from 中「趣影一线」为暴风源，「趣影二线」为 4K 源；4K 源可用时会自动按片名+年份匹配合并，vod_play_url 以 $$$ 与之一一对应。'),
+      el('p', { style: 'font-size:13px;color:var(--text-dim);line-height:1.8' },
+        '创意频道：/api/vod/channels 返回频道清单（高分榜、口碑榜、猜你喜欢、影视系列、明星频道、国漫）。频道片源优先从本站数据库筛选，不足时自动采集并入库；高分榜/口碑榜评分来自采集站点，非豆瓣官方数据。id=guess 需 POST JSON：seeds（最近浏览的影片 ID，≤5 个）、exclude（需排除的 ID，≤20 个），无有效种子时回退口碑榜；该接口响应为 no-store，浏览记录不上共享缓存。'),
     ]));
   }
 
@@ -684,6 +829,7 @@
     document.querySelectorAll('.nav-link').forEach((a) => a.classList.toggle('active', a.dataset.view === v));
     if (v === 'home') renderHome();
     else if (v === 'search') renderSearch();
+    else if (v === 'channels') renderChannels();
     else if (v === 'tvbox') renderTvbox();
     else if (v === 'docs') renderDocs();
   }

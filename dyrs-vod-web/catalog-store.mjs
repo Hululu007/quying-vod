@@ -221,6 +221,67 @@ export class CatalogStore {
     };
   }
 
+  // 频道候选池：按服务端白名单规则从库内筛选完整候选（非单页），
+  // 供 server.mjs 做频道快照的 localLoader；采集结果经 saveQuery 自动入库后这里会越来越丰富。
+  channelVods(rule = {}) {
+    const limit = Math.min(Math.max(Number(rule.limit) || 120, 1), 200);
+    const score = `CAST(json_extract(payload_json,'$.vod_score') AS REAL)`;
+    const hits = `CAST(json_extract(payload_json,'$.vod_hits') AS INTEGER)`;
+    const actor = `json_extract(payload_json,'$.vod_actor')`;
+    const where = [];
+    const params = [];
+    let order = `${score} DESC, vod_id ASC`;
+
+    if (rule.kind === 'score') {
+      where.push(`${score} > 0`);
+    } else if (rule.kind === 'praise') {
+      where.push(`${score} >= 6`);
+      order = `${hits} DESC, vod_id ASC`;
+    } else if (rule.kind === 'series') {
+      const keywords = (rule.keywords || []).slice(0, 10);
+      if (!keywords.length) return { page: 1, pagecount: 1, total: 0, list: [] };
+      where.push(`(${keywords.map(() => `name_key LIKE ? ESCAPE '\\'`).join(' OR ')})`);
+      for (const kw of keywords) params.push(likePattern(kw));
+    } else if (rule.kind === 'star' || rule.kind === 'guess') {
+      const actors = (rule.actors || (rule.actor ? [rule.actor] : [])).slice(0, 6);
+      const typeIds = rule.kind === 'guess' ? (rule.typeIds || []).slice(0, 8) : [];
+      const or = [];
+      for (const _ of actors) or.push(`${actor} LIKE ? ESCAPE '\\'`);
+      for (const a of actors) params.push(likePattern(a));
+      if (typeIds.length) {
+        or.push(`type_id IN (${typeIds.map(() => '?').join(',')})`);
+        for (const t of typeIds) params.push(text(t));
+      }
+      if (!or.length) return { page: 1, pagecount: 1, total: 0, list: [] };
+      where.push(`(${or.join(' OR ')})`);
+      const exclude = (rule.exclude || []).slice(0, 30);
+      if (exclude.length) {
+        where.push(`vod_id NOT IN (${exclude.map(() => '?').join(',')})`);
+        for (const id of exclude) params.push(text(id));
+      }
+    } else if (rule.kind === 'guoman') {
+      where.push(`(type_id = '40' OR (type_id IN ('4','41','42','43') AND area LIKE '%大陆%'))`);
+    } else {
+      return { page: 1, pagecount: 1, total: 0, list: [] };
+    }
+
+    const rows = this.db.prepare(`
+      SELECT * FROM vods WHERE ${where.join(' AND ')}
+      ORDER BY ${order} LIMIT ${limit}
+    `).all(...params);
+    return { page: 1, pagecount: 1, total: rows.length, list: rows.map((row) => this.rowToVod(row)) };
+  }
+
+  // 猜你喜欢的种子信息：仅取库内已有详情的演员与类型，库外 id 直接忽略。
+  seedsInfo(ids) {
+    const list = (Array.isArray(ids) ? ids : []).slice(0, 5).map(text).filter(Boolean);
+    if (!list.length) return [];
+    return this.db.prepare(`
+      SELECT vod_id, type_id, json_extract(payload_json,'$.vod_actor') AS actor
+      FROM vods WHERE vod_id IN (${list.map(() => '?').join(',')})
+    `).all(...list);
+  }
+
   close() {
     this.db.close();
   }

@@ -20,6 +20,8 @@ function wrapCatalogSync(sqlite) {
     getQuery: (key) => sqlite.getQuery(key),
     saveQuery: (key, value, ttl) => sqlite.saveQuery(key, value, ttl),
     searchVods: (wd, page, withPlay) => sqlite.searchVods(wd, page, withPlay),
+    channelVods: (rule) => sqlite.channelVods(rule),
+    seedsInfo: (ids) => sqlite.seedsInfo(ids),
     close: () => { try { sqlite.close(); } catch {} },
   };
 }

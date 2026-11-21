@@ -389,6 +389,62 @@ export class PgCatalogStore {
     };
   }
 
+  // 频道候选池：与 SQLite 版 channelVods 同语义，供频道快照 localLoader 使用。
+  // 评分/热度先正则校验再转数值，避免脏数据导致 ::float 报错。
+  async channelVods(rule = {}) {
+    const limit = Math.min(Math.max(Number(rule.limit) || 120, 1), 200);
+    const scoreRaw = `payload_json::jsonb->>'vod_score'`;
+    const hitsRaw = `payload_json::jsonb->>'vod_hits'`;
+    const score = `CASE WHEN ${scoreRaw} ~ '^\\d+(\\.\\d+)?$' THEN (${scoreRaw})::float ELSE 0 END`;
+    const hits = `CASE WHEN ${hitsRaw} ~ '^\\d+$' THEN (${hitsRaw})::bigint ELSE 0 END`;
+    const actor = `payload_json::jsonb->>'vod_actor'`;
+    const where = [];
+    const params = [];
+    const bind = (value) => { params.push(value); return `$${params.length}`; };
+    let order = `${score} DESC, vod_id ASC`;
+
+    if (rule.kind === 'score') {
+      where.push(`${score} > 0`);
+    } else if (rule.kind === 'praise') {
+      where.push(`${score} >= 6`);
+      order = `${hits} DESC, vod_id ASC`;
+    } else if (rule.kind === 'series') {
+      const keywords = (rule.keywords || []).slice(0, 10);
+      if (!keywords.length) return { page: 1, pagecount: 1, total: 0, list: [] };
+      where.push(`(${keywords.map((kw) => `name_key LIKE ${bind(likePattern(kw))}`).join(' OR ')})`);
+    } else if (rule.kind === 'star' || rule.kind === 'guess') {
+      const actors = (rule.actors || (rule.actor ? [rule.actor] : [])).slice(0, 6);
+      const typeIds = rule.kind === 'guess' ? (rule.typeIds || []).slice(0, 8) : [];
+      const or = [];
+      for (const a of actors) or.push(`${actor} LIKE ${bind(likePattern(a))}`);
+      if (typeIds.length) or.push(`type_id IN (${typeIds.map((t) => bind(text(t))).join(',')})`);
+      if (!or.length) return { page: 1, pagecount: 1, total: 0, list: [] };
+      where.push(`(${or.join(' OR ')})`);
+      const exclude = (rule.exclude || []).slice(0, 30);
+      if (exclude.length) where.push(`vod_id NOT IN (${exclude.map((id) => bind(text(id))).join(',')})`);
+    } else if (rule.kind === 'guoman') {
+      where.push(`(type_id = '40' OR (type_id IN ('4','41','42','43') AND area LIKE '%大陆%'))`);
+    } else {
+      return { page: 1, pagecount: 1, total: 0, list: [] };
+    }
+
+    const rows = await this._q(
+      `SELECT * FROM vods WHERE ${where.join(' AND ')} ORDER BY ${order} LIMIT ${limit}`,
+      params,
+    );
+    return { page: 1, pagecount: 1, total: rows.length, list: rows.map(rowToVod) };
+  }
+
+  async seedsInfo(ids) {
+    const list = (Array.isArray(ids) ? ids : []).slice(0, 5).map(text).filter(Boolean);
+    if (!list.length) return [];
+    return this._q(
+      `SELECT vod_id, type_id, payload_json::jsonb->>'vod_actor' AS actor
+       FROM vods WHERE vod_id IN (${list.map((_, i) => `$${i + 1}`).join(',')})`,
+      list,
+    );
+  }
+
   async close() {
     await this.pool.end();
   }

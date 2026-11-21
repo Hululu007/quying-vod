@@ -1052,9 +1052,10 @@ const RANK_SOURCE_PAGES = 6;
 // 最新/最热/高分推荐：上游不支持排序参数，取前几页本地排序后分页。
 // 最新 = 上游默认 vod_time 倒序，直接透传分页；
 // 最热 = 按 vod_hits 排序（该字段只在 ac=detail 返回）；高分 = 按 vod_score 排序。
-async function fetchRankedList(kind, pg, withPlay) {
+async function fetchRankedList(kind, pg, withPlay, year) {
   const page = parsePage(pg);
-  if (kind === 'new') {
+  const y = parseYear(year);
+  if (kind === 'new' && !y) {
     const data = await fetchBfzyList({ pg: page, t: '', year: '', withPlay });
     return {
       page,
@@ -1067,19 +1068,28 @@ async function fetchRankedList(kind, pg, withPlay) {
   const all = [];
   const seen = new Set();
   for (let p = 1; p <= RANK_SOURCE_PAGES; p += 1) {
-    const data = await upstreamJson({ ac, pg: p }, TTL.list).catch(() => null);
+    const params = { ac, pg: p };
+    if (y) params.year = y;
+    const data = await upstreamJson(params, TTL.list).catch(() => null);
     if (!data) continue;
     for (const item of (Array.isArray(data.list) ? data.list : [])) {
       const key = String(item.vod_id || '');
       if (!key || seen.has(key)) continue;
+      if (y && String(item.vod_year || '') !== y) continue;
       seen.add(key);
       all.push(item);
     }
   }
   const metric = kind === 'hot'
     ? (v) => Number(v.vod_hits) || 0
-    : (v) => Number(v.vod_score) || 0;
-  all.sort((a, b) => metric(b) - metric(a));
+    : kind === 'score'
+      ? (v) => Number(v.vod_score) || 0
+      : (v) => String(v.vod_time || '');
+  all.sort((a, b) => {
+    const av = metric(a);
+    const bv = metric(b);
+    return typeof av === 'string' ? String(bv).localeCompare(String(av)) : bv - av;
+  });
   const start = (page - 1) * PAGE_SIZE;
   const list = all.slice(start, start + PAGE_SIZE);
   if (!withPlay) await hydrate(list);
@@ -1093,9 +1103,9 @@ async function fetchRankedList(kind, pg, withPlay) {
 
 async function fetchList({ pg, t, year, withPlay }) {
   const cat = categoryParam(t);
-  if (cat && cat.kind === 'headline' && RANK_KINDS.has(cat.value) && !year) {
-    const key = `rank:${cat.value}:v1:${withPlay ? 1 : 0}:${parsePage(pg)}:${PAGE_SIZE}`;
-    return catalogQuery(key, TTL.list, () => fetchRankedList(cat.value, pg, withPlay));
+  if (cat && cat.kind === 'headline' && RANK_KINDS.has(cat.value)) {
+    const key = `rank:${cat.value}:v1:${withPlay ? 1 : 0}:${parsePage(pg)}:${PAGE_SIZE}:${parseYear(year)}`;
+    return catalogQuery(key, TTL.list, () => fetchRankedList(cat.value, pg, withPlay, year));
   }
   return catalogQuery(listCacheKey({ pg, t, year, withPlay }), TTL.list, () => fetchListLive({ pg, t, year, withPlay }));
 }
@@ -1130,6 +1140,157 @@ async function fetchSearch(wd, pg, withPlay) {
     () => fetchSearchLive(wd, page, withPlay),
     () => catalogStore.searchVods(title, page, withPlay),
   );
+}
+
+// ---- 创意频道：数据库筛选优先，不足时上游采集并自动入库 ----
+// 每个频道是一份「候选池快照」：去重排序后整池 saveQuery（所有候选自动 saveVod 入库），
+// 分页只从快照切片，避免逐页回源造成重复/漂移。采集统一走暴风 MacCMS（含演员/评分/热度字段）。
+const CHANNEL_POOL_LIMIT = 120;
+const CHANNELS = [
+  { id: 'guess', name: '猜你喜欢', icon: '💡', desc: '越看越懂你：从你最近点开的作品出发，挑出气质相近、值得继续追下去的片单。', kind: 'guess' },
+  { id: 'score', name: '高分榜', icon: '🏆', desc: '口碑数字先说话：只收录有明确评分的作品，从高到低慢慢品味。', kind: 'score' },
+  { id: 'praise', name: '口碑榜', icon: '👍', desc: '经得起反复打开的作品：筛掉低分噪音，按热度与认可度呈现口碑之选。', kind: 'praise' },
+  { id: 'marvel', name: '漫威宇宙', icon: '🦸', desc: '超级英雄集结时刻：钢铁侠、美队、蜘蛛侠……一起重返漫威宇宙的热血与浪漫。', kind: 'series', keywords: ['复仇者联盟', '钢铁侠', '美国队长', '雷神', '蜘蛛侠', '奇异博士', '银河护卫队', '黑豹'] },
+  { id: 'harrypotter', name: '哈利·波特', icon: '⚡', desc: '九又四分之三站台已开启：霍格沃茨、魔法部与神奇动物，陪你重返那个有求必应的世界。', kind: 'series', keywords: ['哈利波特', '哈利·波特', '神奇动物在哪里', '神奇动物：'] },
+  { id: 'fastfurious', name: '速度与激情', icon: '🏎️', desc: '引擎轰鸣，家族不散：从街头飙车到全球冒险，一次补齐肾上腺素名场面。', kind: 'series', keywords: ['速度与激情'] },
+  { id: 'detectivechinatown', name: '唐人街探案', icon: '🕵️', desc: '唐仁与秦风再度合体：搞笑探案、反转谜局，一路笑着追到真相。', kind: 'series', keywords: ['唐人街探案', '唐探'] },
+  { id: 'star-cheng-long', name: '成龙频道', icon: '🥋', desc: '动作招牌，笑点也硬：成龙式搏命动作与功夫喜剧，一次看个痛快。', kind: 'star', actor: '成龙' },
+  { id: 'star-zhou-xing-chi', name: '周星驰频道', icon: '😂', desc: '无厘头里藏着温柔：周星驰经典银幕时刻，笑过之后还想再刷。', kind: 'star', actor: '周星驰' },
+  { id: 'star-wu-jing', name: '吴京频道', icon: '🎖️', desc: '硬汉气质拉满：拳拳到肉的动作场面与家国叙事，热血值直接拉满。', kind: 'star', actor: '吴京' },
+  { id: 'star-shen-teng', name: '沈腾频道', icon: '🤣', desc: '笑点长在他身上：沈腾式喜感与名场面，适合随时来一集解压。', kind: 'star', actor: '沈腾' },
+  { id: 'guoman', name: '国漫频道', icon: '🐉', desc: '国风想象力正在起飞：热血少年、东方神话与手绘美学，一起见证国漫高光。', kind: 'guoman' },
+];
+const CHANNEL_BY_ID = new Map(CHANNELS.map((c) => [c.id, c]));
+
+function channelRule(ch) {
+  if (ch.kind === 'series') return { kind: 'series', keywords: ch.keywords, limit: CHANNEL_POOL_LIMIT };
+  if (ch.kind === 'star') return { kind: 'star', actors: [ch.actor], limit: CHANNEL_POOL_LIMIT };
+  return { kind: ch.kind, limit: CHANNEL_POOL_LIMIT };
+}
+
+function channelScore(v) { const n = Number(v && v.vod_score); return Number.isFinite(n) ? n : 0; }
+function channelHits(v) { const n = Number(v && v.vod_hits); return Number.isFinite(n) ? n : 0; }
+
+function channelItemMatches(ch, v) {
+  if (!v) return false;
+  if (ch.kind === 'score') return channelScore(v) > 0;
+  if (ch.kind === 'praise') return channelScore(v) >= 6;
+  if (ch.kind === 'series') {
+    const name = normalizedTitle(v.vod_name || '').toLowerCase();
+    return (ch.keywords || []).some((k) => {
+      const key = normalizedTitle(k).toLowerCase();
+      return key && name.includes(key);
+    });
+  }
+  if (ch.kind === 'star') return String(v.vod_actor || '').includes(ch.actor);
+  if (ch.kind === 'guoman') {
+    const type = String(v.type_id || '');
+    const area = String(v.vod_area || '');
+    return type === '40' || (['4', '41', '42', '43'].includes(type) && area.includes('大陆'));
+  }
+  return true;
+}
+
+function sortChannelPool(ch, all) {
+  // 最终兜底校验：采集和库筛合并后，仍按频道主题规则过滤一次，避免出现随机/无关内容。
+  const list = all.filter((v) => channelItemMatches(ch, v));
+  const metric = ch.kind === 'praise' ? channelHits : channelScore;
+  return list
+    .sort((a, b) => metric(b) - metric(a) || String(a.vod_id).localeCompare(String(b.vod_id)))
+    .slice(0, CHANNEL_POOL_LIMIT);
+}
+
+async function collectChannelPool(ch) {
+  const seen = new Set();
+  const all = [];
+  const push = (items) => {
+    for (const item of items || []) {
+      const id = String(item && item.vod_id || '');
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      all.push(item);
+    }
+  };
+  if (ch.kind === 'score' || ch.kind === 'praise') {
+    const ac = ch.kind === 'praise' ? 'detail' : 'list';
+    for (let p = 1; p <= RANK_SOURCE_PAGES; p += 1) {
+      const data = await upstreamJson({ ac, pg: p }, TTL.list).catch(() => null);
+      if (data) push(data.list);
+    }
+  } else if (ch.kind === 'guoman') {
+    for (let p = 1; p <= 3; p += 1) {
+      const data = await upstreamJson({ ac: 'detail', t: 40, pg: p }, TTL.list).catch(() => null);
+      if (data) push(data.list);
+    }
+  } else if (ch.kind === 'series') {
+    const keys = ch.keywords.slice(0, 8).map((k) => normalizedTitle(k).toLowerCase());
+    for (const kw of ch.keywords.slice(0, 8)) {
+      const data = await fetchBfzySearch(kw, 1, true).catch(() => null);
+      // 上游搜索是模糊匹配，必须再按关键词过滤片名，与库内筛选口径一致。
+      if (data) push((data.list || []).filter((v) => {
+        const name = normalizedTitle(v.vod_name || '').toLowerCase();
+        return keys.some((k) => k && name.includes(k));
+      }));
+    }
+  } else if (ch.kind === 'star') {
+    // wd 搜索仅用于缩小候选，必须再按演员字段严格过滤，标题命中不算数。
+    for (let p = 1; p <= 2; p += 1) {
+      const data = await fetchBfzySearch(ch.actor, p, true).catch(() => null);
+      if (data) push((data.list || []).filter((v) => String(v.vod_actor || '').includes(ch.actor)));
+    }
+  }
+  const list = sortChannelPool(ch, all);
+  if (!list.length) throw new Error('频道片源暂不可用');
+  return { page: 1, pagecount: 1, total: list.length, list };
+}
+
+async function fetchChannelPool(ch) {
+  const key = `channel:${ch.id}:v1:${CHANNEL_POOL_LIMIT}`;
+  return catalogQuery(
+    key,
+    TTL.list,
+    async () => {
+      const fresh = await collectChannelPool(ch);
+      // 与库内已有候选合并：上游部分页失败导致采集变少时，快照不会因此缩水。
+      if (catalogStore) {
+        try {
+          const local = await catalogStore.channelVods(channelRule(ch));
+          const seen = new Set(fresh.list.map((v) => String(v.vod_id)));
+          const merged = [...fresh.list];
+          for (const v of local.list || []) {
+            if (!seen.has(String(v.vod_id))) { seen.add(String(v.vod_id)); merged.push(v); }
+          }
+          const list = sortChannelPool(ch, merged);
+          return { page: 1, pagecount: 1, total: list.length, list };
+        } catch (error) { catalogFailed(error); }
+      }
+      return fresh;
+    },
+    catalogStore ? () => catalogStore.channelVods(channelRule(ch)) : undefined,
+  );
+}
+
+function sliceChannelPool(pool, pg) {
+  const page = parsePage(pg);
+  const total = Number(pool.total) || (pool.list || []).length;
+  const pagecount = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const start = (page - 1) * PAGE_SIZE;
+  return { page, pagecount, total, list: (pool.list || []).slice(start, start + PAGE_SIZE) };
+}
+
+// 猜你喜欢：种子仅取库内已有详情派生演员/类型，不写共享缓存，无有效种子时回退口碑榜。
+async function fetchGuessPool(seeds, exclude) {
+  if (!catalogStore || !seeds.length) return null;
+  let info = [];
+  try { info = await catalogStore.seedsInfo(seeds); } catch (error) { catalogFailed(error); return null; }
+  if (!info.length) return null;
+  const actors = [...new Set(info
+    .flatMap((r) => String(r.actor || '').split(/[,，/、]/).map((s) => s.trim()))
+    .filter((s) => s && s.length <= 12 && !/^\d+$/.test(s)))].slice(0, 6);
+  const typeIds = [...new Set(info.map((r) => String(r.type_id || '')).filter(Boolean))].slice(0, 8);
+  if (!actors.length && !typeIds.length) return null;
+  const pool = await catalogStore.channelVods({ kind: 'guess', actors, typeIds, exclude, limit: CHANNEL_POOL_LIMIT });
+  return pool.list.length ? pool : null;
 }
 
 // Fetch a single detail record for playback resolution without crossing ID schemes.
@@ -1376,7 +1537,7 @@ async function publicListPayload(data, base, withPlay, opts = {}) {
   const { words, manual } = await insights();
   const page = Number(data.page) || 1;
   let list = data.list.filter((v) => !blockedName(v.vod_name, words));
-  if (page === 1 && manual.length) {
+  if (page === 1 && manual.length && opts.manual !== false) {
     const wdKey = opts.wd ? normalizedTitle(opts.wd).toLowerCase() : '';
     const extra = manual
       .filter((v) => !blockedName(v.vod_name, words))
@@ -1830,7 +1991,7 @@ export async function requestHandler(req, res) {
     return;
   }
 
-  if (req.method !== 'GET') {
+  if (req.method !== 'GET' && !(req.method === 'POST' && p === '/api/vod/channel')) {
     sendJson(res, 405, { ok: false, error: 'method not allowed' });
     return;
   }
@@ -1954,6 +2115,44 @@ export async function requestHandler(req, res) {
   }
 
   // ---- Frontend JSON API ----
+  if (p === '/api/vod/channels') {
+    sendJson(res, 200, {
+      code: 1,
+      list: CHANNELS.map(({ id, name, icon, desc, kind }) => ({ id, name, icon, desc, kind })),
+    });
+    return;
+  }
+
+  if (p === '/api/vod/channel') {
+    const ch = CHANNEL_BY_ID.get(String(url.searchParams.get('id') || ''));
+    if (!ch) { sendJson(res, 400, { ok: false, error: 'unknown channel id' }); return; }
+    try {
+      if (ch.kind === 'guess') {
+        let body = {};
+        if (req.method === 'POST') { try { body = await readJsonBody(req); } catch { body = {}; } }
+        const idRe = /^(?:\d{1,10}|4kcz-\d{1,8})$/;
+        const seeds = (Array.isArray(body.seeds) ? body.seeds : []).filter((s) => typeof s === 'string' && idRe.test(s)).slice(0, 5);
+        const exclude = (Array.isArray(body.exclude) ? body.exclude : []).filter((s) => typeof s === 'string' && idRe.test(s)).slice(0, 20);
+        const personalized = seeds.length ? await fetchGuessPool(seeds, exclude) : null;
+        const pool = personalized || await fetchChannelPool(CHANNEL_BY_ID.get('praise'));
+        const payload = await publicListPayload(sliceChannelPool(pool, url.searchParams.get('pg')), base, false, { manual: false });
+        payload.channel = { id: ch.id, name: ch.name, icon: ch.icon, desc: ch.desc, personalized: Boolean(personalized) };
+        // 浏览历史属于个人隐私：不写共享缓存，响应禁止缓存。
+        res.setHeader('Cache-Control', 'no-store');
+        sendJson(res, 200, payload);
+        return;
+      }
+      const pool = await fetchChannelPool(ch);
+      const payload = await publicListPayload(sliceChannelPool(pool, url.searchParams.get('pg')), base, false, { manual: false });
+      payload.channel = { id: ch.id, name: ch.name, icon: ch.icon, desc: ch.desc };
+      sendJson(res, 200, payload);
+      return;
+    } catch (e) {
+      sendJson(res, 502, { code: 0, msg: String(e.message || e), list: [] });
+      return;
+    }
+  }
+
   if (p === '/api/vod/list' || p === '/api/vod/search' || p === '/api/vod/detail') {
     try {
       if (p === '/api/vod/list') {
