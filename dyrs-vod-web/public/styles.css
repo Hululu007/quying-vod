@@ -338,14 +338,17 @@ main { max-width: 1240px; margin: 0 auto; padding: 28px; }
 .footer-links a { color: var(--text-dim); border-bottom: 1px dashed var(--border); }
 .footer-links a:hover { color: var(--accent); }
 
+/* 每行列数固定为 40 的约数（2/4/5/8/10），保证一页 40 条正好铺满，
+   不会在最后一行留下看起来像“空白卡片”的空位。 */
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
 }
-@media (min-width: 1400px) {
-  .grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; }
-}
+@media (min-width: 560px) { .grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+@media (min-width: 900px) { .grid { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
+@media (min-width: 1200px) { .grid { grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 12px; } }
+@media (min-width: 1600px) { .grid { grid-template-columns: repeat(10, minmax(0, 1fr)); } }
 .card {
   background: var(--card);
   border: 1px solid var(--border);
