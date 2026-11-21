@@ -368,6 +368,19 @@ main { max-width: 1240px; margin: 0 auto; padding: 28px; }
   display: flex; align-items: center; justify-content: center;
   color: var(--text-dim); font-size: 12px;
 }
+.card .poster.loading {
+  background: linear-gradient(110deg, var(--bg-soft) 8%, rgba(255,255,255,.07) 18%, var(--bg-soft) 33%);
+  background-size: 200% 100%;
+  animation: posterShimmer 1.4s linear infinite;
+}
+.card .poster.loading::after {
+  content: '加载中';
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; color: var(--text-dim);
+}
+.card .poster.slow::after { content: '海报加载较慢…'; }
+@keyframes posterShimmer { to { background-position: -200% 0; } }
 .card .badge {
   position: absolute; top: 8px; left: 8px;
   background: rgba(0,0,0,0.7);

@@ -10,6 +10,9 @@
   const CATEGORIES = [
     { group: '分类', items: [
       { t: '', name: '全部', color: 'var(--accent)' },
+      { t: 'new', name: '最新', color: '#22d3ee' },
+      { t: 'hot', name: '最热', color: '#f97316' },
+      { t: 'score', name: '高分推荐', color: '#eab308' },
       { t: '1', name: '电影', color: '#4a9eff', subs: [
         { t: 21, name: '动作' }, { t: 22, name: '喜剧' }, { t: 23, name: '恐怖' },
         { t: 24, name: '科幻' }, { t: 25, name: '爱情' }, { t: 26, name: '剧情' },
@@ -32,6 +35,11 @@
         { t: 59, name: '重生民国' }, { t: 60, name: '穿越年代' },
         { t: 61, name: '现代言情' }, { t: 62, name: '反转爽文' },
         { t: 63, name: '女恋总裁' }, { t: 66, name: '古装仙侠' },
+      ]},
+      { t: '6', name: '预告片', color: '#38bdf8' },
+      { t: '7', name: '体育', color: '#84cc16', subs: [
+        { t: 54, name: '足球' }, { t: 55, name: '篮球' },
+        { t: 56, name: '网球' }, { t: 57, name: '斯诺克' },
       ]},
     ]},
   ];
@@ -117,14 +125,24 @@
   function card(item) {
     const pic = item.vod_pic || '';
     const cardEl = el('div', { class: 'card', onclick: () => openDetail(item.vod_id) });
-    const poster = el('div', { class: 'poster' });
+    const poster = el('div', { class: 'poster loading' });
+    const showPlaceholder = () => {
+      poster.classList.remove('loading');
+      poster.style.backgroundImage = '';
+      if (!poster.querySelector('.placeholder')) poster.appendChild(el('div', { class: 'placeholder' }, '暂无海报'));
+    };
     if (pic) {
-      poster.style.backgroundImage = `url("${pic.replace(/"/g, '%22')}")`;
       const img = new Image();
-      img.onerror = () => { poster.style.backgroundImage = ''; poster.appendChild(el('div', { class: 'placeholder' }, '暂无海报')); };
+      img.onload = () => {
+        poster.style.backgroundImage = `url("${pic.replace(/"/g, '%22')}")`;
+        poster.classList.remove('loading');
+      };
+      img.onerror = showPlaceholder;
       img.src = pic;
+      // 海报长时间未返回时也要有可见反馈，避免出现空白卡片。
+      setTimeout(() => { if (poster.classList.contains('loading')) poster.classList.add('slow'); }, 6000);
     } else {
-      poster.appendChild(el('div', { class: 'placeholder' }, '暂无海报'));
+      showPlaceholder();
     }
     if (item.vod_remarks) poster.appendChild(el('span', { class: 'badge' }, String(item.vod_remarks)));
     const meta = el('div', { class: 'meta' }, [
@@ -163,11 +181,17 @@
 
   function renderPager() {
     if (state.pageCount <= 1) return null;
+    const prev = state.pg > 1
+      ? el('button', { class: 'btn ghost', disabled: state.loading, onclick: () => changePage(state.pg - 1) }, '上一页')
+      : null;
+    const next = state.pg < state.pageCount
+      ? el('button', { class: 'btn ghost', disabled: state.loading, onclick: () => changePage(state.pg + 1) }, '下一页')
+      : null;
     return el('div', { class: 'pager' }, [
-      el('button', { class: 'btn ghost', disabled: state.pg <= 1 || state.loading, onclick: () => changePage(state.pg - 1) }, '上一页'),
+      prev,
       el('span', { class: 'page-info' }, `${state.pg} / ${state.pageCount}`),
-      el('button', { class: 'btn ghost', disabled: state.pg >= state.pageCount || state.loading, onclick: () => changePage(state.pg + 1) }, '下一页'),
-    ]);
+      next,
+    ].filter(Boolean));
   }
 
   // ---- 站点配置 / 分类导航 ----

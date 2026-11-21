@@ -53,9 +53,11 @@ const PROVIDER_TYPES = {
   '3': { head: 45, children: [46, 47, 48, 49] },
   '4': { head: 39, children: [40, 41, 42, 43, 44] },
   '5': { head: 58, children: [59, 60, 61, 62, 63, 64, 65, 66, 68] },
+  '6': { head: 52, children: [52] },
+  '7': { head: 53, children: [54, 55, 56, 57] },
 };
 // A head type maps to its headline id for 4K fallback and client display.
-const HEAD_TO_HEADLINE = { 20: '1', 30: '2', 45: '3', 39: '4', 58: '5' };
+const HEAD_TO_HEADLINE = { 20: '1', 30: '2', 45: '3', 39: '4', 58: '5', 52: '6', 53: '7' };
 // Child types map back to headline as well.
 const CHILD_TO_HEADLINE = {};
 for (const [hid, info] of Object.entries(PROVIDER_TYPES)) {
@@ -68,6 +70,7 @@ const TYPE_NAMES = {
   45: '综艺片', 46: '大陆综艺', 47: '港台综艺', 48: '日韩综艺', 49: '欧美综艺',
   39: '动漫片', 40: '国产动漫', 41: '日韩动漫', 42: '欧美动漫', 43: '港台动漫', 44: '海外动漫',
   58: '短剧大全', 59: '重生民国', 60: '穿越年代', 61: '现代言情', 62: '反转爽文', 63: '女恋总裁', 64: '闪婚离婚', 65: '都市脑洞', 66: '古装仙侠', 68: 'AI漫剧',
+  52: '预告片', 53: '体育赛事', 54: '足球', 55: '篮球', 56: '网球', 57: '斯诺克',
 };
 // 4K 列表卡片的分类标签（.furk）与清晰度标签（.qb）。默认「全部」列表按
 // 4K 站实际展示的分类标注，而不是把所有条目都归为电影。
@@ -103,11 +106,16 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 // Headline categories exposed by this site. The provider only tags leaves, so
 // each headline category is the merge of its child type ids.
 const CATEGORIES = [
+  { id: 'new', name: '最新' },
+  { id: 'hot', name: '最热' },
+  { id: 'score', name: '高分推荐' },
   { id: '1', name: '电影' },
   { id: '2', name: '电视剧' },
   { id: '3', name: '综艺' },
   { id: '4', name: '动漫' },
   { id: '5', name: '短剧' },
+  { id: '6', name: '预告片' },
+  { id: '7', name: '体育' },
 ];
 const CATEGORY_BY_ID = new Map(CATEGORIES.map((c) => [c.id, c]));
 const LEAF_TO_CATEGORY = new Map(Object.entries(CHILD_TO_HEADLINE));
@@ -211,6 +219,71 @@ function rewritePlay(vod, base) {
   return { from, url: urls.join('$$$') };
 }
 
+// ---- 双源播放列表：暴风=趣影一线，4K=趣影二线 ----
+const PAIR_TTL_MS = 1800000;
+const pairCache = new Map();
+
+function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms)),
+  ]);
+}
+
+function firstGroupUrl(v, base) {
+  const play = rewritePlay(v, base);
+  return play.url ? play.url.split('$$$')[0] : '';
+}
+
+async function counterpartUrl(v, base) {
+  const isFourk = String(v.vod_id || '').startsWith('4kcz-');
+  const name = String(v.vod_name || '').trim();
+  const want = name.toLowerCase();
+  if (!want) return '';
+  const key = `${isFourk ? 'f' : 'b'}:${want}:${v.vod_year || ''}`;
+  const hit = pairCache.get(key);
+  if (hit && Date.now() - hit.at < PAIR_TTL_MS) return hit.url;
+  let url = '';
+  const sameYear = (it) => !v.vod_year || !it.vod_year || String(it.vod_year) === String(v.vod_year);
+  try {
+    if (!isFourk) {
+      const res = await withTimeout(fetchFourkSearch(name, 1), 8000);
+      const cand = (res.list || []).find((it) => String(it.vod_name || '').trim().toLowerCase() === want && sameYear(it));
+      if (cand) {
+        const rows = await withTimeout(fetchFourkDetail(String(cand.vod_id)), 8000);
+        const row = Array.isArray(rows) ? rows[0] : rows;
+        if (row) url = firstGroupUrl(row, base);
+      }
+    } else {
+      const data = await withTimeout(fetchBfzySearch(name, 1, true), 8000);
+      const cand = (data.list || []).find((it) => String(it.vod_name || '').trim().toLowerCase() === want && sameYear(it));
+      if (cand) url = firstGroupUrl(cand, base);
+    }
+  } catch {
+    url = '';
+  }
+  pairCache.set(key, { at: Date.now(), url });
+  return url;
+}
+
+async function withPlaySources(v, base) {
+  if (!v || typeof v !== 'object' || String(v.vod_id || '').startsWith('manual-')) return v;
+  const isFourk = String(v.vod_id || '').startsWith('4kcz-');
+  const own = firstGroupUrl(v, base);
+  const other = await counterpartUrl(v, base);
+  const groups = [];
+  if (isFourk) {
+    if (other) groups.push({ from: '趣影一线', url: other });
+    if (own) groups.push({ from: '趣影二线', url: own });
+  } else {
+    if (own) groups.push({ from: '趣影一线', url: own });
+    if (other) groups.push({ from: '趣影二线', url: other });
+  }
+  if (!groups.length) return v;
+  if (!other) groups[0].from = isFourk ? '趣影二线' : '趣影一线';
+  return { ...v, __play: { from: groups.map((g) => g.from).join('$$$'), url: groups.map((g) => g.url).join('$$$') } };
+}
+
 // Normalise one upstream record into our public shape.
 function normalizeItem(v, base, withPlay) {
   if (!v || typeof v !== 'object') return null;
@@ -224,9 +297,12 @@ function normalizeItem(v, base, withPlay) {
   for (const key of PIC_KEYS) if (typeof item[key] === 'string') item[key] = proxyImage(item[key], base);
   // 手动添加的影片直接使用后台填写的播放地址，不走上游播放页改写。
   const isManual = String(v.vod_id || '').startsWith('manual-');
-  const play = withPlay && isManual
-    ? { from: v.vod_play_from || '手动线路', url: v.vod_play_url || '' }
-    : withPlay ? rewritePlay(v, base) : { from: '趣影一线', url: '' };
+  const play = withPlay && v.__play
+    ? v.__play
+    : withPlay && isManual
+      ? { from: v.vod_play_from || '手动线路', url: v.vod_play_url || '' }
+      : withPlay ? rewritePlay(v, base) : { from: '趣影一线', url: '' };
+  delete item.__play;
   item.vod_play_from = play.from;
   item.vod_play_url = play.url;
   return item;
@@ -970,7 +1046,57 @@ function listCacheKey({ pg, t, year, withPlay } = {}) {
   return `list:v5:${withPlay ? 1 : 0}:${parsePage(pg)}:${PAGE_SIZE}:${catKey}:${parseYear(year)}`;
 }
 
+const RANK_KINDS = new Set(['new', 'hot', 'score']);
+const RANK_SOURCE_PAGES = 6;
+
+// 最新/最热/高分推荐：上游不支持排序参数，取前几页本地排序后分页。
+// 最新 = 上游默认 vod_time 倒序，直接透传分页；
+// 最热 = 按 vod_hits 排序（该字段只在 ac=detail 返回）；高分 = 按 vod_score 排序。
+async function fetchRankedList(kind, pg, withPlay) {
+  const page = parsePage(pg);
+  if (kind === 'new') {
+    const data = await fetchBfzyList({ pg: page, t: '', year: '', withPlay });
+    return {
+      page,
+      pagecount: Math.max(1, Number(data.pagecount) || 1),
+      total: Number(data.total) || (data.list || []).length,
+      list: data.list || [],
+    };
+  }
+  const ac = kind === 'hot' ? 'detail' : 'list';
+  const all = [];
+  const seen = new Set();
+  for (let p = 1; p <= RANK_SOURCE_PAGES; p += 1) {
+    const data = await upstreamJson({ ac, pg: p }, TTL.list).catch(() => null);
+    if (!data) continue;
+    for (const item of (Array.isArray(data.list) ? data.list : [])) {
+      const key = String(item.vod_id || '');
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      all.push(item);
+    }
+  }
+  const metric = kind === 'hot'
+    ? (v) => Number(v.vod_hits) || 0
+    : (v) => Number(v.vod_score) || 0;
+  all.sort((a, b) => metric(b) - metric(a));
+  const start = (page - 1) * PAGE_SIZE;
+  const list = all.slice(start, start + PAGE_SIZE);
+  if (!withPlay) await hydrate(list);
+  return {
+    page,
+    pagecount: Math.max(1, Math.ceil(all.length / PAGE_SIZE)),
+    total: all.length,
+    list,
+  };
+}
+
 async function fetchList({ pg, t, year, withPlay }) {
+  const cat = categoryParam(t);
+  if (cat && cat.kind === 'headline' && RANK_KINDS.has(cat.value) && !year) {
+    const key = `rank:${cat.value}:v1:${withPlay ? 1 : 0}:${parsePage(pg)}:${PAGE_SIZE}`;
+    return catalogQuery(key, TTL.list, () => fetchRankedList(cat.value, pg, withPlay));
+  }
   return catalogQuery(listCacheKey({ pg, t, year, withPlay }), TTL.list, () => fetchListLive({ pg, t, year, withPlay }));
 }
 
@@ -1274,7 +1400,10 @@ async function publicListPayload(data, base, withPlay, opts = {}) {
 
 async function publicDetailPayload(rows, base, withPlay) {
   const { words } = await insights();
-  const list = rows.filter((v) => !blockedName(v.vod_name, words));
+  const enriched = withPlay
+    ? await Promise.all(rows.map((row, index) => (index < 3 ? withPlaySources(row, base).catch(() => row) : row)))
+    : rows;
+  const list = enriched.filter((v) => !blockedName(v.vod_name, words));
   return {
     code: 1,
     msg: '数据列表',
@@ -1288,7 +1417,7 @@ async function publicDetailPayload(rows, base, withPlay) {
 }
 
 // ---- 手动影片与采集任务 ----
-const COLLECT_CATS = ['', '1', '2', '3', '4', '5'];
+const COLLECT_CATS = ['', '1', '2', '3', '4', '5', '6', '7'];
 const COLLECT_MAX_PAGES = 6;
 
 function manualError(message) {
