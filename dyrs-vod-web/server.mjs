@@ -153,6 +153,19 @@ function sendJson(res, status, data) {
   res.end(body);
 }
 
+// 公共只读响应：交给 Vercel 边缘 CDN 缓存，s-maxage 内不回源，降低冷启动与跨境延迟。
+function sendJsonCacheable(res, status, data, { maxAge = 30, sMaxAge = 300, stale = 1800 } = {}) {
+  const body = JSON.stringify(data);
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(body),
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Cache-Control': `public, max-age=${maxAge}, s-maxage=${sMaxAge}, stale-while-revalidate=${stale}`,
+  });
+  res.end(body);
+}
+
 // Public base URL for client-facing links. The upstream origin never leaks.
 function publicBase(req) {
   if (PUBLIC_URL) return PUBLIC_URL;
@@ -1142,10 +1155,10 @@ async function fetchSearch(wd, pg, withPlay) {
   );
 }
 
-// ---- 360kan 首页/栏目推荐：只采集标题，再匹配本站片源；播放仍走现有 4K/暴风源 ----
+// ---- 首页/栏目推荐：只采集标题，再匹配本站片源；播放仍走现有 4K/暴风源 ----
 const KAN_API_BASE = 'https://api.web.360kan.com/v1';
 const KAN_SECTIONS = {
-  home: { title: '360首页推荐', cat: null, rankCat: null, ourType: '' },
+  home: { title: '首页推荐', cat: null, rankCat: null, ourType: '' },
   movie: { title: '电影推荐', cat: '1', rankCat: 2, ourType: '1' },
   tv: { title: '电视剧推荐', cat: '2', rankCat: 3, ourType: '2' },
   variety: { title: '综艺推荐', cat: '3', rankCat: 4, ourType: '3' },
@@ -1164,10 +1177,10 @@ async function fetchKanJson(url) {
       'Accept-Encoding': 'identity',
     },
   });
-  if (resp.status < 200 || resp.status >= 300) throw new Error(`360kan request failed: ${resp.status}`);
+  if (resp.status < 200 || resp.status >= 300) throw new Error(`recommend request failed: ${resp.status}`);
   let json;
-  try { json = JSON.parse(resp.body.toString('utf8')); } catch { throw new Error('360kan invalid json'); }
-  if (json && json.errno !== 0) throw new Error(`360kan error: ${json.msg || 'unknown'}`);
+  try { json = JSON.parse(resp.body.toString('utf8')); } catch { throw new Error('recommend invalid json'); }
+  if (json && json.errno !== 0) throw new Error(`recommend error: ${json.msg || 'unknown'}`);
   return json;
 }
 
@@ -1230,8 +1243,8 @@ async function collectKanRecommendations(section) {
     seen.add(id);
     list.push(row);
   }
-  if (!list.length) throw new Error('360kan recommendation unavailable');
-  return { page: 1, pagecount: 1, total: list.length, list, source: '360kan' };
+  if (!list.length) throw new Error('recommendation unavailable');
+  return { page: 1, pagecount: 1, total: list.length, list, source: 'recommend' };
 }
 
 async function fetchKanRecommendations(section, limit) {
@@ -1496,31 +1509,65 @@ async function resolveFourkMedia(ep) {
   });
 }
 
+// 播放地址短时内存缓存：同一集 5 分钟内复用已解析结果，避免重复回源采集（不入库，符合短期有效约束）。
+const PLAY_URL_CACHE = new Map();
+const PLAY_URL_CACHE_TTL = 5 * 60 * 1000;
+const PLAY_URL_INFLIGHT = new Map();
+
 async function resolvePlayback(id, seq) {
-  const row = await detailForPlay(id);
-  const isFourk = id.startsWith('4kcz-');
-  const episodes = row ? playableGroups(row.vod_play_url, isFourk).flat() : [];
-  const ep = episodes[seq];
-  if (!ep) {
-    const error = new Error('episode not found');
-    error.status = 404;
-    throw error;
-  }
-  if (!isFourk) return { media: new URL(ep.url), name: ep.name };
+  const key = `${id}:${seq}`;
+  const hit = PLAY_URL_CACHE.get(key);
+  if (hit && Date.now() - hit.ts < PLAY_URL_CACHE_TTL) return hit.value;
+  const pending = PLAY_URL_INFLIGHT.get(key);
+  if (pending) return pending;
+  const task = (async () => {
+    const row = await detailForPlay(id);
+    const isFourk = id.startsWith('4kcz-');
+    const episodes = row ? playableGroups(row.vod_play_url, isFourk).flat() : [];
+    const ep = episodes[seq];
+    if (!ep) {
+      const error = new Error('episode not found');
+      error.status = 404;
+      throw error;
+    }
+    let media;
+    if (!isFourk) {
+      media = new URL(ep.url);
+    } else {
+      try {
+        media = await resolveFourkMedia(ep);
+      } catch {
+        media = await resolveBfzyFallback(row, episodes, ep, seq);
+      }
+    }
+    const value = { media, name: ep.name };
+    PLAY_URL_CACHE.set(key, { value, ts: Date.now() });
+    if (PLAY_URL_CACHE.size > 2000) {
+      for (const [k, v] of PLAY_URL_CACHE) {
+        if (Date.now() - v.ts >= PLAY_URL_CACHE_TTL) PLAY_URL_CACHE.delete(k);
+      }
+    }
+    return value;
+  })();
+  PLAY_URL_INFLIGHT.set(key, task);
   try {
-    return { media: await resolveFourkMedia(ep), name: ep.name };
-  } catch {}
-  return { media: await resolveBfzyFallback(row, episodes, ep, seq), name: ep.name };
+    return await task;
+  } finally {
+    PLAY_URL_INFLIGHT.delete(key);
+  }
 }
 
-function serveFile(res, filePath) {
+function serveFile(res, filePath, versioned = false) {
   fs.readFile(filePath, (err, data) => {
     if (err) { sendJson(res, 404, { ok: false, error: 'not found' }); return; }
     const ext = path.extname(filePath).toLowerCase();
-    const noCache = ['.html', '.js', '.mjs', '.css'].includes(ext);
+    let cache;
+    if (ext === '.html') cache = 'no-cache'; // 入口 HTML 始终轻量校验，保证新版本即时生效
+    else if (versioned) cache = 'public, max-age=31536000, immutable'; // 带 ?v= 的版本化资源由边缘 CDN 长期缓存
+    else cache = 'public, max-age=86400';
     res.writeHead(200, {
       'Content-Type': MIME[ext] || 'application/octet-stream',
-      'Cache-Control': noCache ? 'no-cache' : 'public, max-age=3600',
+      'Cache-Control': cache,
       'Content-Length': data.length,
     });
     res.end(data);
@@ -2104,24 +2151,24 @@ export async function requestHandler(req, res) {
   }
 
   if (p === '/api/health') {
-    sendJson(res, 200, { ok: true, ts: Date.now() });
+    sendJsonCacheable(res, 200, { ok: true, ts: Date.now() }, { sMaxAge: 10, maxAge: 5 });
     return;
   }
 
   // 前台公开配置与广告位
   if (p === '/api/site') {
-    sendJson(res, 200, await sitePayload());
+    sendJsonCacheable(res, 200, await sitePayload(), { sMaxAge: 300 });
     return;
   }
   if (p === '/api/ads') {
     const slot = url.searchParams.get('slot') === 'nav' ? 'nav' : 'carousel';
-    sendJson(res, 200, { ok: true, list: adminStore ? await adminStore.publicAds(slot) : [] });
+    sendJsonCacheable(res, 200, { ok: true, list: adminStore ? await adminStore.publicAds(slot) : [] }, { sMaxAge: 300 });
     return;
   }
   if (p === '/api/card/verify') {
     const code = (url.searchParams.get('code') || '').trim();
     if (!code) { sendJson(res, 400, { ok: false, error: 'code is required' }); return; }
-    sendJson(res, 200, { ok: true, ...(adminStore ? await adminStore.verifyCard(code) : { valid: false, reason: '后台未启用' }) });
+    sendJsonCacheable(res, 200, { ok: true, ...(adminStore ? await adminStore.verifyCard(code) : { valid: false, reason: '后台未启用' }) }, { sMaxAge: 60, maxAge: 10 });
     return;
   }
 
@@ -2156,7 +2203,7 @@ export async function requestHandler(req, res) {
   }
 
   if (p === '/api/vod/tvbox') {
-    sendJson(res, 200, tvboxConfig(base));
+    sendJsonCacheable(res, 200, tvboxConfig(base), { sMaxAge: 3600, maxAge: 60 });
     return;
   }
 
@@ -2209,12 +2256,12 @@ export async function requestHandler(req, res) {
       return;
     }
     if (p === '/resolve') {
-      sendJson(res, 200, { code: 1, msg: 'ok', url: media.toString(), name });
+      sendJsonCacheable(res, 200, { code: 1, msg: 'ok', url: media.toString(), name }, { sMaxAge: 300, maxAge: 30 });
       return;
     }
     res.writeHead(302, {
       Location: media.toString(),
-      'Cache-Control': 'no-store',
+      'Cache-Control': 'public, max-age=30, s-maxage=300, stale-while-revalidate=1800',
       'Access-Control-Allow-Origin': '*',
     });
     res.end();
@@ -2230,9 +2277,9 @@ export async function requestHandler(req, res) {
       const limit = Math.max(1, Math.min(30, Number(url.searchParams.get('limit')) || 12));
       const data = await fetchKanRecommendations(section, limit);
       const payload = await publicListPayload(data, publicBase(req), false, { manual: false, t: cfg.ourType || undefined });
-      payload.source = '360kan';
+      payload.source = 'recommend';
       payload.section = section;
-      sendJson(res, 200, payload);
+      sendJsonCacheable(res, 200, payload, { sMaxAge: 300 });
       return;
     } catch {
       try {
@@ -2245,7 +2292,7 @@ export async function requestHandler(req, res) {
         );
         payload.source = 'fallback';
         payload.section = section;
-        sendJson(res, 200, payload);
+        sendJsonCacheable(res, 200, payload, { sMaxAge: 300 });
         return;
       } catch (error) {
         sendJson(res, 502, { ok: false, error: (error && error.message) || 'recommendation unavailable' });
@@ -2255,10 +2302,10 @@ export async function requestHandler(req, res) {
   }
 
   if (p === '/api/vod/channels') {
-    sendJson(res, 200, {
+    sendJsonCacheable(res, 200, {
       code: 1,
       list: CHANNELS.map(({ id, name, icon, desc, kind }) => ({ id, name, icon, desc, kind })),
-    });
+    }, { sMaxAge: 300 });
     return;
   }
 
@@ -2284,7 +2331,7 @@ export async function requestHandler(req, res) {
       const pool = await fetchChannelPool(ch);
       const payload = await publicListPayload(sliceChannelPool(pool, url.searchParams.get('pg')), base, false, { manual: false });
       payload.channel = { id: ch.id, name: ch.name, icon: ch.icon, desc: ch.desc };
-      sendJson(res, 200, payload);
+      sendJsonCacheable(res, 200, payload, { sMaxAge: 120 });
       return;
     } catch (e) {
       sendJson(res, 502, { code: 0, msg: String(e.message || e), list: [] });
@@ -2300,17 +2347,17 @@ export async function requestHandler(req, res) {
           t: url.searchParams.get('t'),
           year: parseYear(url.searchParams.get('year')),
         });
-        sendJson(res, 200, await publicListPayload(data, base, false, {
+        sendJsonCacheable(res, 200, await publicListPayload(data, base, false, {
           t: url.searchParams.get('t'),
           year: parseYear(url.searchParams.get('year')),
-        }));
+        }), { sMaxAge: 300 });
         return;
       }
       if (p === '/api/vod/search') {
         const wd = (url.searchParams.get('wd') || '').trim();
         if (!wd) { sendJson(res, 400, { ok: false, error: 'wd is required' }); return; }
         const data = await fetchSearch(wd.slice(0, 60), url.searchParams.get('pg'));
-        sendJson(res, 200, await publicListPayload(data, base, false, { wd }));
+        sendJsonCacheable(res, 200, await publicListPayload(data, base, false, { wd }), { sMaxAge: 300 });
         return;
       }
       const ids = (url.searchParams.get('ids') || '').trim();
@@ -2319,7 +2366,7 @@ export async function requestHandler(req, res) {
         return;
       }
       const rows = await fetchDetail(ids);
-      sendJson(res, 200, await publicDetailPayload(rows, base, true));
+      sendJsonCacheable(res, 200, await publicDetailPayload(rows, base, true), { sMaxAge: 600 });
       return;
     } catch (e) {
       sendJson(res, 502, { code: 0, msg: String(e.message || e), list: [] });
@@ -2335,12 +2382,12 @@ export async function requestHandler(req, res) {
     try {
       if (ac === 'detail' && /^(?:(?:\d{1,10}|4kcz-\d{1,8})|manual-[a-z0-9]{4,24})(?:,(?:(?:\d{1,10}|4kcz-\d{1,8})|manual-[a-z0-9]{4,24})){0,19}$/.test(ids)) {
         const rows = await fetchDetail(ids);
-        sendJson(res, 200, await publicDetailPayload(rows, base, true));
+        sendJsonCacheable(res, 200, await publicDetailPayload(rows, base, true), { sMaxAge: 600 });
         return;
       }
       if (ac === 'detail' && wd) {
         const data = await fetchSearch(wd.slice(0, 60), url.searchParams.get('pg'), true);
-        sendJson(res, 200, await publicListPayload(data, base, true, { wd }));
+        sendJsonCacheable(res, 200, await publicListPayload(data, base, true, { wd }), { sMaxAge: 300 });
         return;
       }
       if (ac === 'detail') {
@@ -2350,10 +2397,10 @@ export async function requestHandler(req, res) {
           year: parseYear(url.searchParams.get('year')),
           withPlay: true,
         });
-        sendJson(res, 200, await publicListPayload(data, base, true, {
+        sendJsonCacheable(res, 200, await publicListPayload(data, base, true, {
           t: url.searchParams.get('t'),
           year: parseYear(url.searchParams.get('year')),
-        }));
+        }), { sMaxAge: 300 });
         return;
       }
       const data = await fetchList({
@@ -2361,10 +2408,10 @@ export async function requestHandler(req, res) {
         t: url.searchParams.get('t'),
         year: parseYear(url.searchParams.get('year')),
       });
-      sendJson(res, 200, await publicListPayload(data, base, false, {
+      sendJsonCacheable(res, 200, await publicListPayload(data, base, false, {
         t: url.searchParams.get('t'),
         year: parseYear(url.searchParams.get('year')),
-      }));
+      }), { sMaxAge: 300 });
       return;
     } catch (e) {
       sendJson(res, 502, { code: 0, msg: String(e.message || e), list: [], class: CLASSES });
@@ -2395,7 +2442,7 @@ export async function requestHandler(req, res) {
       sendJson(res, 404, { ok: false, error: 'not found' });
       return;
     }
-    serveFile(res, filePath);
+    serveFile(res, filePath, /[?&]v=/.test(req.url || ''));
   });
 }
 

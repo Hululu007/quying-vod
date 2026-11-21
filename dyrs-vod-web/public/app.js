@@ -254,14 +254,6 @@
     return wrap;
   }
 
-  function viewMore(t) {
-    selectCategory(t);
-    requestAnimationFrame(() => {
-      const target = document.getElementById('listWrap') || document.getElementById('catNavHost');
-      if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    });
-  }
-
   function selectCategory(t) {
     state.t = t;
     state.pg = 1;
@@ -534,11 +526,11 @@
 
     const portalHost = el('div', { id: 'portalHost' });
     app.appendChild(portalHost);
-    loadPortalSection('360首页推荐', '和 360kan 首页同步的推荐片单', { section: 'home', limit: 12 }, { text: '查看更多', onclick: () => viewMore('') });
-    loadPortalSection('电视剧推荐', '360kan 栏目里的电视剧热推', { section: 'tv', limit: 12 }, { text: '查看更多', onclick: () => viewMore('2') });
-    loadPortalSection('电影推荐', '360kan 栏目里的电影热推', { section: 'movie', limit: 12 }, { text: '查看更多', onclick: () => viewMore('1') });
-    loadPortalSection('综艺推荐', '360kan 栏目里的综艺热推', { section: 'variety', limit: 12 }, { text: '查看更多', onclick: () => viewMore('3') });
-    loadPortalSection('动漫推荐', '360kan 栏目里的动漫热推', { section: 'anime', limit: 12 }, { text: '查看更多', onclick: () => viewMore('4') });
+    loadPortalSection('首页推荐', '同步更新的首页推荐片单', { section: 'home', limit: 12 });
+    loadPortalSection('电视剧推荐', '热门电视剧推荐', { section: 'tv', limit: 12 });
+    loadPortalSection('电影推荐', '热门电影推荐', { section: 'movie', limit: 12 });
+    loadPortalSection('综艺推荐', '热门综艺推荐', { section: 'variety', limit: 12 });
+    loadPortalSection('动漫推荐', '热门动漫推荐', { section: 'anime', limit: 12 });
     loadChannelPreview();
   }
 
@@ -872,7 +864,7 @@
       ['GET', '/api/health', '本站健康检查', '—'],
       ['GET', '/api/vod/tvbox', 'TVBox 配置 JSON', '—'],
       ['GET', '/api/vod/list', '影片列表', 'pg（页码）、t（分类，见下方）、year（可选）'],
-      ['GET', '/api/vod/kan', '360kan 首页/栏目推荐（匹配本站可播片源）', 'section（home/movie/tv/variety/anime）、limit（1–30，默认 12）'],
+      ['GET', '/api/vod/kan', '首页/栏目推荐（匹配本站可播片源）', 'section（home/movie/tv/variety/anime）、limit（1–30，默认 12）'],
       ['GET', '/api/vod/search', '搜索', 'wd（关键词）'],
       ['GET', '/api/vod/detail', '影片详情', 'ids（影片 ID）'],
       ['GET', '/api/vod/channels', '创意频道清单', '—'],
@@ -909,7 +901,7 @@
       el('p', { style: 'font-size:13px;color:var(--text-dim);line-height:1.8' },
         '创意频道：/api/vod/channels 返回频道清单（高分榜、口碑榜、猜你喜欢、影视系列、明星频道、国漫）。频道片源优先从本站数据库筛选，不足时自动采集并入库；高分榜/口碑榜评分来自采集站点，非豆瓣官方数据。id=guess 需 POST JSON：seeds（最近浏览的影片 ID，≤5 个）、exclude（需排除的 ID，≤20 个），无有效种子时回退口碑榜；该接口响应为 no-store，浏览记录不上共享缓存。'),
       el('p', { style: 'font-size:13px;color:var(--text-dim);line-height:1.8' },
-        '360kan 推荐：/api/vod/kan 采集 360kan 首页（section=home）与各栏目（movie/tv/variety/anime）的推荐标题，再用片名精确匹配本站已有 4K / 暴风片源，返回的 vod_id 均为本站可播放 ID；360kan 仅作推荐标题来源，不直接播放。全部匹配失败时回退为对应分类列表（source=fallback）。'),
+        '推荐片单：/api/vod/kan 采集公开首页与各栏目（section=home/movie/tv/variety/anime）的推荐标题，再用片名精确匹配本站已有 4K / 暴风片源，返回的 vod_id 均为本站可播放 ID；推荐来源仅作标题参考，不直接播放。全部匹配失败时回退为对应分类列表（source=fallback）。'),
     ]));
   }
 
