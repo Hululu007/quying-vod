@@ -930,7 +930,19 @@ function scheduleCatalogRefresh(key, ttl, loader) {
 async function catalogQuery(key, ttl, loader, localLoader) {
   const cached = await readCatalogQuery(key);
   if (cached) {
-    if (cached.stale) scheduleCatalogRefresh(key, ttl, loader);
+    if (!cached.stale) return cached.value;
+    // Serverless 实例在响应结束后随时会被回收，后台刷新往往来不及落库。
+    // 代价是过期后的第一次请求要同步刷新，但能保证采集结果必定写入数据库。
+    if (process.env.VERCEL) {
+      try {
+        const value = await loader();
+        await saveCatalogQuery(key, value, ttl);
+        return value;
+      } catch {
+        return cached.value;
+      }
+    }
+    scheduleCatalogRefresh(key, ttl, loader);
     return cached.value;
   }
   if (catalogStore && localLoader) {
@@ -978,9 +990,12 @@ async function fetchSearch(wd, pg, withPlay) {
 
 // Fetch a single detail record for playback resolution without crossing ID schemes.
 async function detailForPlay(id) {
-  if (/^4kcz-\d{1,8}$/.test(id)) return fetchFourkDetail(id);
-  const rows = await fetchBfzyDetail(id);
-  return rows.find((row) => String(row.vod_id) === String(id)) || rows[0] || null;
+  const row = /^4kcz-\d{1,8}$/.test(id)
+    ? await fetchFourkDetail(id)
+    : (await fetchBfzyDetail(id)).find((item) => String(item.vod_id) === String(id)) || null;
+  // 采集到的详情同样回写数据库，供后续 ac=detail 直接命中。
+  if (row) await saveCatalogQuery(`detail:${id}`, { page: 1, pagecount: 1, total: 1, list: [row] }, TTL.detail);
+  return row;
 }
 
 function normalizedTitle(value) {
