@@ -48,6 +48,7 @@
     { t: 'score', name: '高分推荐' },
   ];
 
+
   const YEARS = [
     { y: '', name: '全部' },
     { y: '2026', name: '2026' },
@@ -205,6 +206,11 @@
 
   // ---- 站点配置 / 分类导航 ----
   const PRIMARY = CATEGORIES[0].items;
+  // 首页门户式快捷分类：参考 360kan 的主导航思路，但仍复用现有分类参数。
+  const PORTAL_CATS = [
+    { t: '', name: '首页' },
+    ...PRIMARY.filter((c) => c.t !== '').slice(0, 6),
+  ];
   let site = {
     name: '趣影', subtitle: '高清影视 · 即搜即看', notice: '', footer: '',
     adsEnabled: true, carouselInterval: 5000,
@@ -266,6 +272,7 @@
     }
     const hint = document.getElementById('filterHint');
     if (hint) hint.textContent = filterSummary();
+    syncPortalCats();
     loadList();
   }
 
@@ -434,6 +441,82 @@
     if (wrap) loadListInto(wrap);
   }
 
+  function portalCategoryNav() {
+    const row = el('div', { class: 'portal-cats' });
+    PORTAL_CATS.forEach((c) => {
+      row.appendChild(el('button', {
+        class: 'portal-cat' + (String(state.t) === String(c.t) ? ' active' : ''),
+        'data-t': String(c.t),
+        onclick: () => selectCategory(String(c.t)),
+      }, c.name));
+    });
+    return el('div', { class: 'portal-cat-bar' }, row);
+  }
+
+  function syncPortalCats() {
+    document.querySelectorAll('.portal-cat').forEach((b) => {
+      b.classList.toggle('active', b.dataset.t === String(state.t));
+    });
+  }
+
+  function portalSection(title, desc, more) {
+    const head = el('div', { class: 'section-title portal-title' }, [
+      el('h3', {}, title),
+      desc ? el('span', { class: 'hint' }, desc) : null,
+      more ? el('button', { class: 'portal-more', onclick: more.onclick }, more.text) : null,
+    ].filter(Boolean));
+    const grid = el('div', { class: 'portal-grid' });
+    const wrap = el('section', { class: 'portal-section' }, [head, grid]);
+    return { wrap, grid };
+  }
+
+  async function loadPortalSection(title, desc, params, more) {
+    const host = document.getElementById('portalHost');
+    if (!host) return;
+    const { wrap, grid } = portalSection(title, desc, more);
+    host.appendChild(wrap);
+    try {
+      const query = new URLSearchParams({ pg: '1', ...params }).toString();
+      const data = await api(`/api/vod/list?${query}`);
+      const list = (Array.isArray(data.list) ? data.list : []).slice(0, 12);
+      if (!list.length) { wrap.remove(); return; }
+      clear(grid);
+      list.forEach((it) => grid.appendChild(card(it)));
+    } catch {
+      wrap.remove();
+    }
+  }
+
+  async function loadChannelPreview() {
+    const host = document.getElementById('portalHost');
+    if (!host) return;
+    const wrap = el('section', { class: 'portal-section channel-preview' });
+    host.appendChild(wrap);
+    try {
+      const data = await api('/api/vod/channels');
+      const list = (Array.isArray(data.list) ? data.list : []).slice(0, 8);
+      if (!list.length) { wrap.remove(); return; }
+      clear(wrap);
+      wrap.appendChild(el('div', { class: 'section-title portal-title' }, [
+        el('h3', {}, '创意专题'),
+        el('span', { class: 'hint' }, '按主题整理好的片单空间'),
+        el('button', { class: 'portal-more', onclick: () => setView('channels') }, '全部频道'),
+      ]));
+      const grid = el('div', { class: 'portal-grid channel-preview-grid' });
+      list.forEach((c) => {
+        grid.appendChild(el('div', { class: 'channel-card channel-mini', onclick: () => openChannel(c) }, [
+          el('div', { class: 'channel-icon' }, c.icon || '🎬'),
+          el('div', { class: 'channel-name' }, c.name),
+          el('div', { class: 'channel-desc' }, c.desc || ''),
+          el('div', { class: 'channel-more' }, '进入专题 →'),
+        ]));
+      });
+      wrap.appendChild(grid);
+    } catch {
+      wrap.remove();
+    }
+  }
+
   function renderHome() {
     clear(app);
     if (playbackFailed) app.appendChild(banner('err', '所有播放源暂不可用，已返回首页。'));
@@ -442,6 +525,14 @@
     const heroHost = el('div', { id: 'heroCarousel', class: 'hero-carousel' });
     app.appendChild(heroHost);
     loadHero(heroHost);
+
+    app.appendChild(portalCategoryNav());
+    const portalHost = el('div', { id: 'portalHost' });
+    app.appendChild(portalHost);
+    loadPortalSection('正在热播', '热度靠前，大家都在刷', { t: 'hot' }, { text: '查看更多', onclick: () => selectCategory('hot') });
+    loadPortalSection('高分必看', '评分清晰，先看口碑之作', { t: 'score' }, { text: '查看更多', onclick: () => selectCategory('score') });
+    loadPortalSection('最近上新', '更新时间靠前，不错过新内容', { t: 'new' }, { text: '查看更多', onclick: () => selectCategory('new') });
+    loadChannelPreview();
 
     app.appendChild(el('div', { class: 'search-strip' }, [
       el('div', { class: 'search-box' }, [
@@ -452,7 +543,7 @@
 
     app.appendChild(el('div', { class: 'cat-panel' }, [
       el('div', { class: 'cat-panel-head' }, [
-        el('span', { class: 'cat-panel-title' }, '片库'),
+        el('span', { class: 'cat-panel-title' }, '全部片库'),
         el('span', { class: 'filter-hint', id: 'filterHint' }, filterSummary()),
       ]),
       el('div', { id: 'catNavHost' }, [categoryNav(), yearPills(), rankPills()]),

@@ -9,6 +9,7 @@
   --accent: #ff5c7a;
   --accent-2: #8b5cf6;
   --accent-grad: linear-gradient(135deg, #ff5c7a, #8b5cf6);
+  --teal: #1fb69a;
   --ok: #34d399;
   --warn: #f5a623;
   --err: #ff6b6b;
@@ -562,6 +563,55 @@ table.docs code { color: #ffd28a; background: var(--bg); padding: 2px 6px; borde
 .channel-detail-title .channel-icon { font-size: 36px; }
 .channel-detail-title h2 { margin: 0 0 6px; font-size: 24px; letter-spacing: 0.5px; }
 .channel-detail-title p { margin: 0 0 6px; color: var(--text-dim); font-size: 13px; line-height: 1.7; max-width: 720px; }
+
+/* ---- 360kan 风格首页门户：栏目、快捷分类与横滑卡片 ---- */
+.portal-cat-bar { margin: -4px 0 18px; }
+.portal-cats { display: flex; gap: 10px; flex-wrap: wrap; }
+.portal-cat {
+  padding: 8px 16px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text-dim);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.portal-cat:hover { color: var(--text); border-color: var(--teal); transform: translateY(-1px); }
+.portal-cat.active {
+  color: #fff;
+  background: linear-gradient(135deg, var(--teal), #0ea5a4);
+  border-color: transparent;
+  box-shadow: 0 6px 16px rgba(31, 182, 154, 0.25);
+}
+.portal-section { margin: 22px 0; }
+.portal-title { margin: 0 0 14px; }
+.portal-title h3 { font-size: 19px; }
+.portal-title h3::before { background: linear-gradient(135deg, var(--teal), #0ea5a4); }
+.portal-more {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: var(--teal);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+.portal-grid {
+  display: flex;
+  gap: 14px;
+  overflow-x: auto;
+  padding: 4px 2px 12px;
+  scroll-snap-type: x proximity;
+}
+.portal-grid .card { flex: 0 0 150px; }
+.portal-grid::-webkit-scrollbar { height: 8px; }
+.card:hover .title { color: var(--teal); }
+.channel-preview-grid .channel-mini { flex: 0 0 220px; min-height: 150px; }
+.channel-mini .channel-icon { font-size: 26px; }
+.channel-mini .channel-name { font-size: 15px; }
+@media (min-width: 760px) { .portal-grid .card { flex-basis: 165px; } }
+@media (min-width: 1100px) { .portal-grid .card { flex-basis: 175px; } }
 
 @media (max-width: 640px) {
   .topbar { flex-wrap: wrap; padding: 12px 16px; }
