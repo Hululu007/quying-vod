@@ -20,6 +20,11 @@ const DEFAULT_SETTINGS = {
   footer_text: '本站仅聚合公开影视元数据与播放源信息，不存储任何影片文件。数据来源于公开接口，仅供学习交流。',
   ads_enabled: '1',
   carousel_interval: '5000',
+  blocked_words: '',
+  collect_token: '',
+  collect_cursor: '{"ci":0,"page":1}',
+  collect_last_run: '',
+  collect_total: '0',
 };
 const AD_SLOTS = new Set(['carousel', 'nav']);
 const CAROUSEL_MAX = 5;
@@ -162,6 +167,11 @@ const SCHEMA = [
      token VARCHAR(64) PRIMARY KEY,
      created_at BIGINT NOT NULL,
      expires_at BIGINT NOT NULL
+   )`,
+  `CREATE TABLE IF NOT EXISTS manual_vods (
+     vod_id VARCHAR(64) PRIMARY KEY,
+     updated_at BIGINT NOT NULL,
+     payload TEXT NOT NULL
    )`,
 ];
 
@@ -431,7 +441,7 @@ export class PgAdminStore {
       for (const [key, value] of entries) {
         await conn.query(
           'INSERT INTO settings ("key", value) VALUES ($1, $2) ON CONFLICT ("key") DO UPDATE SET value = EXCLUDED.value',
-          [key, str(value, 2000)],
+          [key, str(value, 8000)],
         );
       }
       await conn.query('COMMIT');
@@ -455,6 +465,29 @@ export class PgAdminStore {
       'INSERT INTO settings ("key", value) VALUES (\'admin_password_hash\', $1) ON CONFLICT ("key") DO UPDATE SET value = EXCLUDED.value',
       [hashPassword(password)],
     );
+  }
+
+  // ---- 手动影片 ----
+  async listManualVods() {
+    const rows = await this._q('SELECT payload FROM manual_vods ORDER BY updated_at DESC');
+    return rows
+      .map((row) => { try { return JSON.parse(row.payload); } catch { return null; } })
+      .filter(Boolean);
+  }
+
+  async saveManualVod(vod = {}) {
+    const id = str(vod.vod_id, 64);
+    if (!id) throw new Error('缺少影片 ID');
+    await this.pool.query(
+      'INSERT INTO manual_vods (vod_id, updated_at, payload) VALUES ($1, $2, $3) ON CONFLICT (vod_id) DO UPDATE SET updated_at = EXCLUDED.updated_at, payload = EXCLUDED.payload',
+      [id, now(), JSON.stringify(vod)],
+    );
+    return vod;
+  }
+
+  async deleteManualVod(id) {
+    await this.pool.query('DELETE FROM manual_vods WHERE vod_id = $1', [String(id || '')]);
+    return true;
   }
 
   async createSession(ttlMs = 7 * 24 * 3600 * 1000) {

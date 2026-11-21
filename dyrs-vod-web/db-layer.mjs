@@ -12,6 +12,7 @@ const ADMIN_METHODS = [
   'listAds', 'publicAds', 'createAd', 'updateAd', 'deleteAd',
   'generateCards', 'listCards', 'exportCards', 'setCardStatus', 'deleteCard',
   'verifyCard', 'overview',
+  'listManualVods', 'saveManualVod', 'deleteManualVod',
 ];
 
 function wrapCatalogSync(sqlite) {

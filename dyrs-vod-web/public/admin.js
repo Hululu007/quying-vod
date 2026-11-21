@@ -16,6 +16,10 @@
   let cardStatus = '';
   let cardQuery = '';
   let cardPage = 1;
+  let editingVodId = null;
+  let vodFormOpen = false;
+  let categoryCache = null;
+  let collectToken = '';
 
   // ---- 基础工具 ----
   function el(tag, attrs = {}, children = []) {
@@ -49,7 +53,22 @@
       init.headers['Content-Type'] = 'application/json';
       init.body = JSON.stringify(options.body);
     }
-    const res = await fetch(path, init);
+    const controller = new AbortController();
+    init.signal = controller.signal;
+    const timer = setTimeout(() => controller.abort(), options.timeout || 30000);
+    let res;
+    try {
+      res = await fetch(path, init);
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        const timeoutError = new Error('请求超时，服务端仍在处理，请稍后刷新查看');
+        timeoutError.status = 0;
+        throw timeoutError;
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
     let data = null;
     try { data = await res.json(); } catch { /* 非 JSON */ }
     if (!res.ok || (data && data.ok === false)) {
@@ -132,6 +151,8 @@
       document.querySelectorAll('.side-link[data-tab]').forEach((b) => b.classList.toggle('active', b === button));
       tab = button.dataset.tab;
       editingAdId = null;
+      editingVodId = null;
+      vodFormOpen = false;
       renderTab(tab);
     });
   });
@@ -142,6 +163,8 @@
       if (name === 'overview') await renderOverview();
       else if (name === 'ads') await renderAds();
       else if (name === 'cards') await renderCards();
+      else if (name === 'videos') await renderVideos();
+      else if (name === 'collect') await renderCollect();
       else if (name === 'settings') await renderSettings();
     } catch (error) {
       if (error.status === 401) { showLogin(); return; }
@@ -434,6 +457,270 @@
     }
   }
 
+  // ---- 手动影片 ----
+  async function loadCategories() {
+    if (categoryCache) return categoryCache;
+    const { list } = await api('/api/admin/categories');
+    categoryCache = list || [];
+    return categoryCache;
+  }
+
+  function vodTypeSelect(categories, selected) {
+    const select = el('select', { id: 'vodTypeId' }, categories.map((cat) => el('optgroup', { label: cat.type_name }, (cat.children || []).map((child) => {
+      const option = el('option', { value: String(child.type_id) }, child.type_name || String(child.type_id));
+      if (String(child.type_id) === String(selected)) option.selected = true;
+      return option;
+    }))));
+    return select;
+  }
+
+  function vodPlayLines(vod) {
+    return String(vod.vod_play_url || '')
+      .split('#')
+      .map((episode) => {
+        const cut = episode.indexOf('$');
+        return cut >= 0 ? `${episode.slice(0, cut)}|${episode.slice(cut + 1)}` : episode;
+      })
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  function vodForm(categories, vod) {
+    const value = (key) => (vod && vod[key] != null ? String(vod[key]) : '');
+    const form = el('form', { class: 'panel-card' }, [
+      el('h3', {}, vod ? `编辑影片：${vod.vod_name}` : '新增影片'),
+      el('p', { class: 'desc' }, '分类按二级 type_id 提交；播放地址每行一集，格式「名称|https://xxx.m3u8」，只写 url 也可以。'),
+      el('div', { class: 'row' }, [
+        el('div', { class: 'field' }, [el('label', {}, '影片名称 *'), el('input', { id: 'vodName', value: value('vod_name') })]),
+        el('div', { class: 'field' }, [el('label', {}, '分类 *'), vodTypeSelect(categories, value('type_id'))]),
+        el('div', { class: 'field' }, [el('label', {}, '年份'), el('input', { id: 'vodYear', value: value('vod_year') })]),
+        el('div', { class: 'field' }, [el('label', {}, '地区'), el('input', { id: 'vodArea', value: value('vod_area') })]),
+      ]),
+      el('div', { class: 'row' }, [
+        el('div', { class: 'field' }, [el('label', {}, '备注'), el('input', { id: 'vodRemarks', value: value('vod_remarks') })]),
+        el('div', { class: 'field' }, [el('label', {}, '海报地址（http/https）'), el('input', { id: 'vodPic', value: value('vod_pic') })]),
+      ]),
+      el('div', { class: 'row' }, [
+        el('div', { class: 'field' }, [el('label', {}, '主演'), el('input', { id: 'vodActor', value: value('vod_actor') })]),
+        el('div', { class: 'field' }, [el('label', {}, '导演'), el('input', { id: 'vodDirector', value: value('vod_director') })]),
+      ]),
+      el('div', { class: 'field' }, [el('label', {}, '简介'), el('textarea', { id: 'vodContent', rows: '3' }, value('vod_content'))]),
+      el('div', { class: 'field' }, [
+        el('label', {}, '播放地址 *（每行一集）'),
+        el('textarea', { id: 'vodPlayUrl', rows: '6', placeholder: '第1集|https://xxx.m3u8' }, value('vod_play_url') ? vodPlayLines(vod) : ''),
+      ]),
+      el('div', { class: 'actions' }, [
+        el('button', { class: 'btn', type: 'submit' }, vod ? '保存修改' : '新增影片'),
+        el('button', { class: 'btn ghost', type: 'button', onclick: () => { editingVodId = null; vodFormOpen = false; renderTab('videos'); } }, '取消'),
+      ]),
+    ]);
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const body = {
+        vod_name: document.getElementById('vodName').value.trim(),
+        type_id: document.getElementById('vodTypeId').value,
+        vod_year: document.getElementById('vodYear').value.trim(),
+        vod_area: document.getElementById('vodArea').value.trim(),
+        vod_remarks: document.getElementById('vodRemarks').value.trim(),
+        vod_pic: document.getElementById('vodPic').value.trim(),
+        vod_actor: document.getElementById('vodActor').value.trim(),
+        vod_director: document.getElementById('vodDirector').value.trim(),
+        vod_content: document.getElementById('vodContent').value.trim(),
+        vod_play_url: document.getElementById('vodPlayUrl').value,
+      };
+      if (editingVodId) body.vod_id = editingVodId;
+      try {
+        await api('/api/admin/videos', { method: 'POST', body });
+        editingVodId = null;
+        vodFormOpen = false;
+        toast('已保存');
+        renderTab('videos');
+      } catch (error) {
+        toast(error.message, 'err');
+      }
+    });
+    return form;
+  }
+
+  async function renderVideos() {
+    setHead('手动影片', '手工添加的影片会混入列表、搜索与详情');
+    const [categories, videos] = await Promise.all([loadCategories(), api('/api/admin/videos')]);
+    const list = videos.list || [];
+    const editing = editingVodId ? list.find((vod) => String(vod.vod_id) === String(editingVodId)) : null;
+
+    panel.appendChild(el('div', { class: 'panel-card' }, [
+      el('h3', {}, '手动影片'),
+      el('p', { class: 'desc' }, '手动影片优先出现在列表第一页，并参与搜索、详情与 TVBox 输出；播放地址仅保存原始链接。'),
+      el('div', { class: 'actions' }, [
+        el('button', {
+          class: 'btn small',
+          onclick: () => {
+            vodFormOpen = !vodFormOpen;
+            if (!vodFormOpen) editingVodId = null;
+            renderTab('videos');
+          },
+        }, vodFormOpen ? '收起表单' : '新增影片'),
+      ]),
+    ]));
+    if (vodFormOpen) panel.appendChild(vodForm(categories, editing));
+
+    const rows = list.map((vod) => el('tr', {}, [
+      el('td', {}, vod.vod_name || '—'),
+      el('td', {}, vod.type_name || '—'),
+      el('td', {}, vod.vod_year || '—'),
+      el('td', {}, `${String(vod.vod_play_url || '').split('#').filter(Boolean).length} 集`),
+      el('td', {}, el('div', { class: 'actions' }, [
+        el('button', {
+          class: 'btn small ghost',
+          onclick: () => { editingVodId = vod.vod_id; vodFormOpen = true; renderTab('videos'); },
+        }, '编辑'),
+        el('button', {
+          class: 'btn small danger',
+          onclick: async () => {
+            if (!confirm(`确定删除影片「${vod.vod_name || vod.vod_id}」？`)) return;
+            try {
+              await api(`/api/admin/videos/${vod.vod_id}`, { method: 'DELETE' });
+              if (String(editingVodId) === String(vod.vod_id)) editingVodId = null;
+              toast('已删除');
+              renderTab('videos');
+            } catch (error) { toast(error.message, 'err'); }
+          },
+        }, '删除'),
+      ])),
+    ]));
+
+    panel.appendChild(el('div', { class: 'panel-card' }, [
+      el('h3', {}, `现有手动影片（${list.length}）`),
+      list.length ? el('div', { class: 'table-wrap' }, el('table', { class: 'data' }, [
+        el('thead', {}, el('tr', {}, ['名称', '分类', '年份', '集数', '操作'].map((h) => el('th', {}, h)))),
+        el('tbody', {}, rows),
+      ])) : el('div', { class: 'empty' }, '还没有手动影片'),
+    ]));
+  }
+
+  // ---- 采集 ----
+  async function renderCollectStats(host) {
+    const { data } = await api('/api/admin/collect/status');
+    collectToken = data.token || '';
+    clear(host);
+    const cursor = data.cursor || { ci: 0, page: 1 };
+    const totalCats = data.categories || 6;
+    host.appendChild(el('div', { class: 'stat-grid' }, [
+      statCard('累计采集页数', data.total, '每次批量采集自动累加'),
+      statCard('当前游标', `第 ${cursor.ci + 1}/${totalCats} 分类`, `第 ${cursor.page} 页`),
+      statCard('上次运行', data.lastRun ? fmtTime(data.lastRun) : '尚未运行', data.lastRun ? '本地时间' : '还没有采集记录'),
+    ]));
+    const tokenLine = document.getElementById('collectTokenText');
+    if (tokenLine) {
+      tokenLine.textContent = collectToken || '尚未生成';
+      tokenLine.classList.toggle('muted', !collectToken);
+    }
+  }
+
+  async function renderCollect() {
+    setHead('采集', '分批抓取上游片库，游标自动推进');
+    const statusHost = el('div', {});
+    panel.appendChild(statusHost);
+    await renderCollectStats(statusHost);
+
+    const progress = el('span', { class: 'muted', style: 'align-self:center' }, '');
+    const runButton = el('button', { class: 'btn small' }, '一键采集');
+    runButton.addEventListener('click', async () => {
+      runButton.disabled = true;
+      let processed = 0;
+      let skipped = 0;
+      try {
+        for (let i = 0; i < 12; i += 1) {
+          const result = await api('/api/admin/collect', { method: 'POST', body: { pages: 3 }, timeout: 60000 });
+          processed += Number(result.processed) || 0;
+          skipped += Number(result.skipped) || 0;
+          progress.textContent = `已处理 ${processed} 页 / 跳过 ${skipped} 页`;
+          if (result.cycleDone) break;
+        }
+        toast('本轮采集完成');
+        await renderCollectStats(statusHost);
+      } catch (error) {
+        toast(error.message, 'err');
+      } finally {
+        runButton.disabled = false;
+      }
+    });
+    panel.appendChild(el('div', { class: 'panel-card' }, [
+      el('h3', {}, '采集操作'),
+      el('p', { class: 'desc' }, '每次最多处理 12 批，每批 3 页；走完所有分类后自动从头开始。'),
+      el('div', { class: 'actions' }, [
+        runButton,
+        el('button', {
+          class: 'btn small ghost',
+          onclick: async (event) => {
+            const target = event.currentTarget;
+            target.disabled = true;
+            try {
+              const result = await api('/api/admin/collect', { method: 'POST', body: { pages: 1, force: true }, timeout: 60000 });
+              toast(`已强制采集 1 页（处理 ${result.processed} / 跳过 ${result.skipped}）`);
+              await renderCollectStats(statusHost);
+            } catch (error) {
+              toast(error.message, 'err');
+            } finally {
+              target.disabled = false;
+            }
+          },
+        }, '强制重采当前游标'),
+        progress,
+      ]),
+    ]));
+
+    const tokenLine = el('div', { class: 'token-line', id: 'collectTokenText' }, collectToken || '尚未生成');
+    if (!collectToken) tokenLine.classList.add('muted');
+    panel.appendChild(el('div', { class: 'panel-card' }, [
+      el('h3', {}, '采集密钥'),
+      el('p', { class: 'desc' }, '密钥用于 GitHub Actions 定时调用采集接口，请勿公开。'),
+      tokenLine,
+      el('div', { class: 'actions', style: 'margin-top:12px' }, [
+        el('button', {
+          class: 'btn small ghost',
+          onclick: async () => {
+            try {
+              const { token } = await api('/api/admin/collect/token', { method: 'POST', body: {} });
+              collectToken = token || '';
+              tokenLine.textContent = collectToken || '尚未生成';
+              tokenLine.classList.toggle('muted', !collectToken);
+              toast('密钥已生成');
+            } catch (error) {
+              toast(error.message, 'err');
+            }
+          },
+        }, '生成/重置密钥'),
+        el('button', {
+          class: 'btn small ghost',
+          onclick: async () => {
+            if (!collectToken) { toast('尚未生成密钥', 'err'); return; }
+            try {
+              await navigator.clipboard.writeText(collectToken);
+              toast('已复制密钥');
+            } catch {
+              toast('复制失败，请手动选择文本复制', 'err');
+            }
+          },
+        }, '复制'),
+      ]),
+    ]));
+
+    panel.appendChild(el('div', { class: 'panel-card' }, [
+      el('h3', {}, '自动采集'),
+      el('p', { class: 'desc' }, [
+        '在 GitHub Actions 中每 10 分钟调用 ',
+        el('span', { class: 'code' }, 'GET /api/admin/collect?token=<密钥>&pages=2'),
+        '，需要在仓库 Secrets 中配置 ',
+        el('span', { class: 'code' }, 'SITE_URL'),
+        ' 与 ',
+        el('span', { class: 'code' }, 'COLLECT_TOKEN'),
+        '。',
+      ]),
+      el('p', { class: 'desc' }, '每次只采一小批，游标在服务端自动推进，永不停歇。'),
+    ]));
+  }
+
   // ---- 站点设置与授权 ----
   async function renderSettings() {
     setHead('站点与授权', '站点文案、广告开关与管理员密码');
@@ -448,6 +735,11 @@
       ]),
       el('div', { class: 'field' }, [el('label', {}, '首页公告（留空不显示）'), el('textarea', { id: 'siteNotice', rows: '2' }, data.site_notice || '')]),
       el('div', { class: 'field' }, [el('label', {}, '页脚文案'), el('textarea', { id: 'footerText', rows: '2' }, data.footer_text || '')]),
+      el('div', { class: 'field' }, [
+        el('label', {}, '屏蔽词（一行一个）'),
+        el('textarea', { id: 'blockedWords', rows: '4', placeholder: '例如：广告\n预告' }, data.blocked_words || ''),
+      ]),
+      el('p', { class: 'desc' }, '命中屏蔽词的影片不会出现在列表、搜索、详情和 TVBox 中。'),
       el('div', { class: 'row' }, [
         el('div', { class: 'field' }, [
           el('label', {}, '轮播间隔（毫秒）'),
@@ -473,6 +765,7 @@
             site_subtitle: document.getElementById('siteSubtitle').value.trim(),
             site_notice: document.getElementById('siteNotice').value.trim(),
             footer_text: document.getElementById('footerText').value.trim(),
+            blocked_words: document.getElementById('blockedWords').value,
             carousel_interval: String(Number(document.getElementById('carouselInterval').value) || 5000),
             ads_enabled: document.getElementById('adsEnabled').checked ? '1' : '0',
           },

@@ -48,7 +48,7 @@
     { y: 'older', name: '更早' },
   ];
 
-  const state = { view: 'home', t: '', year: '', pg: 1, pagesize: 40, q: '', total: 0, pageCount: 1, list: [], loading: false, error: '' };
+  const state = { view: 'home', t: '', year: '', pg: 1, pagesize: 40, q: '', total: 0, pageCount: 1, list: [], loading: false, searching: false, error: '' };
   const bootParams = new URLSearchParams(location.search);
   const playbackFailed = bootParams.get('error') === 'playback';
   if (playbackFailed) {
@@ -74,19 +74,28 @@
   }
   const clear = (n) => { while (n.firstChild) n.removeChild(n.firstChild); };
 
-  async function api(path) {
-    const res = await fetch(path, { headers: { Accept: 'application/json' } });
-    const text = await res.text();
-    let data = null;
-    try { data = JSON.parse(text); } catch { /* non-json */ }
-    if (!res.ok || (data && data.ok === false)) {
-      const msg = (data && data.error) || `HTTP ${res.status}`;
-      throw new Error(msg);
+  async function api(path, opts = {}) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), opts.timeout || 30000);
+    try {
+      const res = await fetch(path, { headers: { Accept: 'application/json' }, signal: controller.signal });
+      const text = await res.text();
+      let data = null;
+      try { data = JSON.parse(text); } catch { /* non-json */ }
+      if (!res.ok || (data && data.ok === false)) {
+        const msg = (data && data.error) || (data && data.msg) || `HTTP ${res.status}`;
+        throw new Error(msg);
+      }
+      return data;
+    } catch (e) {
+      if (e.name === 'AbortError') throw new Error('请求超时，上游响应过慢，请稍后重试');
+      throw e;
+    } finally {
+      clearTimeout(timer);
     }
-    return data;
   }
 
-  function spinner() { return el('div', { class: 'loading' }, [el('div', { class: 'spinner' }), el('div', { style: 'margin-top:12px' }, '加载中…')]); }
+  function spinner(text = '加载中…') { return el('div', { class: 'loading' }, [el('div', { class: 'spinner' }), el('div', { style: 'margin-top:12px' }, text)]); }
 
   function banner(type, msg) { return el('div', { class: `banner ${type}` }, msg); }
 
@@ -407,8 +416,10 @@
   }
 
   async function loadListInto(wrap) {
+    if (state.loading) return;
+    state.loading = true;
     clear(wrap);
-    wrap.appendChild(spinner());
+    wrap.appendChild(spinner('加载中…（上游较慢时约 5–10 秒）'));
     try {
       const yearParam = /^\d{4}$/.test(state.year) ? `&year=${state.year}` : '';
       const data = await api(`/api/vod/list?pg=${state.pg}${state.t ? '&t=' + encodeURIComponent(state.t) : ''}${yearParam}`);
@@ -416,21 +427,30 @@
       state.total = Number(data.total) || 0;
       state.pageCount = Number(data.pagecount) || 1;
       state.error = '';
-      clear(wrap);
-      wrap.appendChild(renderGrid());
-      const pagerHost = document.getElementById('pagerHost');
-      if (pagerHost) {
-        clear(pagerHost);
-        const pager = renderPager();
-        if (pager) pagerHost.appendChild(pager);
+      if (!state.list.length) {
+        clear(wrap);
+        wrap.appendChild(el('div', { class: 'empty' }, '该分类暂无内容，换个分类或年份试试'));
+      } else {
+        clear(wrap);
+        wrap.appendChild(renderGrid());
       }
     } catch (e) {
       state.list = [];
       state.error = e.message;
       clear(wrap);
-      wrap.appendChild(banner('warn', `列表加载失败：${e.message}（上游接口可能暂不可用，稍后再试）`));
+      const box = el('div', {}, [banner('warn', `列表加载失败：${e.message}`)]);
+      box.appendChild(el('div', { class: 'empty' }, [
+        el('button', { class: 'btn', onclick: () => loadList() }, '重试'),
+      ]));
+      wrap.appendChild(box);
+    } finally {
+      state.loading = false;
       const pagerHost = document.getElementById('pagerHost');
-      if (pagerHost) clear(pagerHost);
+      if (pagerHost) {
+        clear(pagerHost);
+        const pager = state.list.length ? renderPager() : null;
+        if (pager) pagerHost.appendChild(pager);
+      }
     }
   }
 
@@ -441,7 +461,7 @@
   }
 
   function changePage(p) {
-    if (p < 1 || p > state.pageCount) return;
+    if (state.loading || p < 1 || p > state.pageCount) return;
     state.pg = p;
     loadList();
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -471,8 +491,10 @@
   }
 
   async function doSearchInto(wrap) {
+    if (state.searching) return;
+    state.searching = true;
     clear(wrap);
-    wrap.appendChild(spinner());
+    wrap.appendChild(spinner('搜索中…（上游较慢时约 5–10 秒）'));
     try {
       const data = await api(`/api/vod/search?wd=${encodeURIComponent(state.q)}`);
       const list = Array.isArray(data.list) ? data.list : [];
@@ -484,7 +506,13 @@
       wrap.appendChild(grid);
     } catch (e) {
       clear(wrap);
-      wrap.appendChild(banner('warn', `搜索失败：${e.message}`));
+      const box = el('div', {}, [banner('warn', `搜索失败：${e.message}`)]);
+      box.appendChild(el('div', { class: 'empty' }, [
+        el('button', { class: 'btn', onclick: () => doSearch() }, '重试'),
+      ]));
+      wrap.appendChild(box);
+    } finally {
+      state.searching = false;
     }
   }
 

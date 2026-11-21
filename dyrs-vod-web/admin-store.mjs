@@ -12,6 +12,11 @@ const DEFAULT_SETTINGS = {
   footer_text: '本站仅聚合公开影视元数据与播放源信息，不存储任何影片文件。数据来源于公开接口，仅供学习交流。',
   ads_enabled: '1',
   carousel_interval: '5000',
+  blocked_words: '',
+  collect_token: '',
+  collect_cursor: '{"ci":0,"page":1}',
+  collect_last_run: '',
+  collect_total: '0',
 };
 
 const AD_SLOTS = new Set(['carousel', 'nav']);
@@ -97,6 +102,11 @@ export class AdminStore {
         created_at INTEGER NOT NULL,
         expires_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS manual_vods (
+        vod_id TEXT PRIMARY KEY,
+        updated_at INTEGER NOT NULL,
+        payload TEXT NOT NULL
+      );
     `);
 
     const insertSetting = this.db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
@@ -124,7 +134,7 @@ export class AdminStore {
     const allowed = new Set(Object.keys(DEFAULT_SETTINGS));
     const stmt = this.db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
     const tx = this.db.transaction((entries) => {
-      for (const [key, value] of entries) stmt.run(key, str(value, 2000));
+      for (const [key, value] of entries) stmt.run(key, str(value, 8000));
     });
     tx(Object.entries(patch).filter(([key]) => allowed.has(key)));
     return this.getSettings();
@@ -138,6 +148,27 @@ export class AdminStore {
   setPassword(password) {
     this.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('admin_password_hash', ?)")
       .run(hashPassword(password));
+  }
+
+  // ---- 手动影片 ----
+  listManualVods() {
+    const rows = this.db.prepare('SELECT payload FROM manual_vods ORDER BY updated_at DESC').all();
+    return rows
+      .map((row) => { try { return JSON.parse(row.payload); } catch { return null; } })
+      .filter(Boolean);
+  }
+
+  saveManualVod(vod = {}) {
+    const id = str(vod.vod_id, 64);
+    if (!id) throw new Error('缺少影片 ID');
+    this.db.prepare('INSERT OR REPLACE INTO manual_vods (vod_id, updated_at, payload) VALUES (?, ?, ?)')
+      .run(id, now(), JSON.stringify(vod));
+    return vod;
+  }
+
+  deleteManualVod(id) {
+    this.db.prepare('DELETE FROM manual_vods WHERE vod_id = ?').run(String(id || ''));
+    return true;
   }
 
   // ---- 会话 ----

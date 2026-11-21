@@ -98,3 +98,5 @@ logs/
 
 # CodeGraph index
 .codegraph
+# GitHub Actions 工作流需在网页端添加（本地 token 无 workflow 权限）
+.github/workflows/

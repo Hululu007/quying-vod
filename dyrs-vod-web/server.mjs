@@ -5,6 +5,7 @@ import http from 'node:http';
 import https from 'node:https';
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -221,7 +222,11 @@ function normalizeItem(v, base, withPlay) {
   // 上游自带分类名时优先展示（4K 列表即为站点卡片上的原始标签）。
   item.type_name = v.type_name || categoryName(rawId) || '';
   for (const key of PIC_KEYS) if (typeof item[key] === 'string') item[key] = proxyImage(item[key], base);
-  const play = withPlay ? rewritePlay(v, base) : { from: '趣影一线', url: '' };
+  // 手动添加的影片直接使用后台填写的播放地址，不走上游播放页改写。
+  const isManual = String(v.vod_id || '').startsWith('manual-');
+  const play = withPlay && isManual
+    ? { from: v.vod_play_from || '手动线路', url: v.vod_play_url || '' }
+    : withPlay ? rewritePlay(v, base) : { from: '趣影一线', url: '' };
   item.vod_play_from = play.from;
   item.vod_play_url = play.url;
   return item;
@@ -958,22 +963,35 @@ async function catalogQuery(key, ttl, loader, localLoader) {
   return value;
 }
 
-async function fetchList({ pg, t, year, withPlay }) {
+function listCacheKey({ pg, t, year, withPlay } = {}) {
   // 查询键必须用字符串，否则原始二级分类会全部落到同一个 [object Object] 缓存上。
   const cat = categoryParam(t);
   const catKey = cat ? `${cat.kind}:${cat.value}` : '';
-  const key = `list:v5:${withPlay ? 1 : 0}:${parsePage(pg)}:${PAGE_SIZE}:${catKey}:${parseYear(year)}`;
-  return catalogQuery(key, TTL.list, () => fetchListLive({ pg, t, year, withPlay }));
+  return `list:v5:${withPlay ? 1 : 0}:${parsePage(pg)}:${PAGE_SIZE}:${catKey}:${parseYear(year)}`;
+}
+
+async function fetchList({ pg, t, year, withPlay }) {
+  return catalogQuery(listCacheKey({ pg, t, year, withPlay }), TTL.list, () => fetchListLive({ pg, t, year, withPlay }));
 }
 
 async function fetchDetail(ids) {
-  const idList = String(ids).split(',');
-  const key = `detail:${idList.join(',')}`;
-  const data = await catalogQuery(key, TTL.detail, async () => {
-    const rows = await fetchDetailLive(ids);
-    return { page: 1, pagecount: 1, total: rows.length, list: rows };
-  });
-  return data.list;
+  const idList = String(ids).split(',').map((s) => s.trim()).filter(Boolean);
+  const manualIds = idList.filter((id) => id.startsWith('manual-'));
+  const upstreamIds = idList.filter((id) => !id.startsWith('manual-'));
+  const rows = [];
+  for (const id of manualIds) {
+    const vod = await manualVodById(id);
+    if (vod) rows.push(vod);
+  }
+  if (upstreamIds.length) {
+    const key = `detail:${upstreamIds.join(',')}`;
+    const data = await catalogQuery(key, TTL.detail, async () => {
+      const list = await fetchDetailLive(upstreamIds.join(','));
+      return { page: 1, pagecount: 1, total: list.length, list };
+    });
+    rows.push(...data.list);
+  }
+  return rows;
 }
 
 async function fetchSearch(wd, pg, withPlay) {
@@ -1175,6 +1193,191 @@ function listPayload(data, base, withPlay) {
   };
 }
 
+// ---- 屏蔽词与手动影片（进程内缓存 30 秒，后台修改后立即失效） ----
+let insightCache = { at: 0, words: [], manual: [] };
+
+function resetInsights() { insightCache = { at: 0, words: [], manual: [] }; }
+
+async function insights() {
+  if (!adminStore) return { words: [], manual: [] };
+  if (Date.now() - insightCache.at < 30000) return insightCache;
+  try {
+    const settings = await adminStore.getSettings();
+    const words = String(settings.blocked_words || '')
+      .split(/[\n,，]/)
+      .map((w) => w.trim().toLowerCase())
+      .filter(Boolean)
+      .slice(0, 500);
+    const manual = await adminStore.listManualVods();
+    insightCache = { at: Date.now(), words, manual };
+  } catch (error) {
+    console.warn('[quying] insight load failed:', error.message);
+  }
+  return insightCache;
+}
+
+function blockedName(name, words) {
+  if (!words || !words.length) return false;
+  const key = normalizedTitle(name).toLowerCase();
+  return words.some((w) => key.includes(w));
+}
+
+function manualMatchType(vod, t) {
+  const cat = categoryParam(t);
+  if (!cat) return true;
+  const tid = Number(vod.type_id);
+  if (cat.kind === 'headline') return (PROVIDER_TYPES[cat.value]?.children || []).includes(tid);
+  return tid === Number(cat.value);
+}
+
+function manualEpisodes(raw) {
+  const lines = String(raw || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  return lines.map((line, index) => {
+    const cut = line.indexOf('|');
+    const name = cut > 0 ? line.slice(0, cut).trim() : `第${index + 1}集`;
+    const url = (cut > 0 ? line.slice(cut + 1) : line).trim();
+    return `${name}$${url}`;
+  }).join('#');
+}
+
+async function manualVodById(id) {
+  const { manual } = await insights();
+  return manual.find((v) => String(v.vod_id) === String(id)) || null;
+}
+
+// 列表/搜索统一出口：过滤屏蔽词，并在第一页混入手动影片。
+async function publicListPayload(data, base, withPlay, opts = {}) {
+  const { words, manual } = await insights();
+  const page = Number(data.page) || 1;
+  let list = data.list.filter((v) => !blockedName(v.vod_name, words));
+  if (page === 1 && manual.length) {
+    const wdKey = opts.wd ? normalizedTitle(opts.wd).toLowerCase() : '';
+    const extra = manual
+      .filter((v) => !blockedName(v.vod_name, words))
+      .filter((v) => !wdKey || normalizedTitle(v.vod_name).toLowerCase().includes(wdKey))
+      .filter((v) => opts.wd || manualMatchType(v, opts.t))
+      .filter((v) => !opts.year || String(v.vod_year || '') === String(opts.year));
+    const seen = new Set(list.map((v) => String(v.vod_id)));
+    list = [...extra.filter((v) => !seen.has(String(v.vod_id))), ...list];
+  }
+  return {
+    code: 1,
+    msg: '数据列表',
+    page,
+    pagecount: data.pagecount,
+    limit: PAGE_SIZE,
+    total: Math.max(Number(data.total) || 0, list.length),
+    list: list.map((v) => normalizeItem(v, base, withPlay)).filter(Boolean),
+    class: CLASSES,
+  };
+}
+
+async function publicDetailPayload(rows, base, withPlay) {
+  const { words } = await insights();
+  const list = rows.filter((v) => !blockedName(v.vod_name, words));
+  return {
+    code: 1,
+    msg: '数据列表',
+    page: 1,
+    pagecount: 1,
+    limit: PAGE_SIZE,
+    total: list.length,
+    list: list.map((v) => normalizeItem(v, base, withPlay)).filter(Boolean),
+    class: CLASSES,
+  };
+}
+
+// ---- 手动影片与采集任务 ----
+const COLLECT_CATS = ['', '1', '2', '3', '4', '5'];
+const COLLECT_MAX_PAGES = 6;
+
+function manualError(message) {
+  return Object.assign(new Error(message), { status: 400 });
+}
+
+function normalizeManualVod(input = {}) {
+  const name = String(input.vod_name || '').trim().slice(0, 120);
+  if (!name) throw manualError('影片名称必填');
+  const typeId = Number(input.type_id);
+  if (!Number.isInteger(typeId) || !TYPE_NAMES[typeId]) throw manualError('分类无效');
+  const pic = String(input.vod_pic || '').trim().slice(0, 800);
+  if (pic && !/^https?:\/\//i.test(pic)) throw manualError('海报必须是 http/https 地址');
+  const playUrl = manualEpisodes(input.vod_play_url);
+  if (!playUrl) throw manualError('至少填写一集播放地址');
+  const urls = playUrl.split('#').map((ep) => ep.split('$')[1] || '');
+  if (urls.some((u) => !/^https?:\/\//i.test(u))) throw manualError('播放地址必须是 http/https 链接');
+  const id = /^manual-[a-z0-9]{4,24}$/.test(String(input.vod_id || ''))
+    ? String(input.vod_id)
+    : `manual-${Date.now().toString(36)}${crypto.randomBytes(3).toString('hex')}`;
+  return {
+    vod_id: id,
+    vod_name: name,
+    type_id: String(typeId),
+    type_name: TYPE_NAMES[typeId] || '',
+    vod_year: String(input.vod_year || '').trim().slice(0, 10),
+    vod_area: String(input.vod_area || '').trim().slice(0, 30),
+    vod_remarks: String(input.vod_remarks || '').trim().slice(0, 60),
+    vod_actor: String(input.vod_actor || '').trim().slice(0, 200),
+    vod_director: String(input.vod_director || '').trim().slice(0, 120),
+    vod_content: String(input.vod_content || '').trim().slice(0, 2000),
+    vod_pic: pic,
+    vod_play_from: '手动线路',
+    vod_play_url: playUrl,
+    manual: true,
+    updated_at: Date.now(),
+  };
+}
+
+function parseCollectCursor(value) {
+  try {
+    const parsed = JSON.parse(String(value || ''));
+    const ci = Number(parsed.ci);
+    const page = Number(parsed.page);
+    if (Number.isInteger(ci) && ci >= 0 && ci < COLLECT_CATS.length && Number.isInteger(page) && page >= 1) {
+      return { ci, page };
+    }
+  } catch { /* 使用默认游标 */ }
+  return { ci: 0, page: 1 };
+}
+
+// 分批采集：每次最多处理若干页，避免撞上 Serverless 执行时长上限。
+async function collectBatch({ pages = 3, force = false } = {}) {
+  const settings = await adminStore.getSettings();
+  let cursor = parseCollectCursor(settings.collect_cursor);
+  const limit = Math.min(Math.max(Number(pages) || 3, 1), COLLECT_MAX_PAGES);
+  const started = Date.now();
+  let processed = 0;
+  let skipped = 0;
+  let cycleDone = false;
+  for (let i = 0; i < limit; i += 1) {
+    if (i > 0 && Date.now() - started > 45000) break;
+    const t = COLLECT_CATS[cursor.ci];
+    const key = listCacheKey({ pg: cursor.page, t, year: '' });
+    const cached = await catalogStore.getQuery(key);
+    let pagecount = cached && cached.value ? Number(cached.value.pagecount) || 1 : 1;
+    if (cached && !cached.stale && !force) {
+      skipped += 1;
+    } else {
+      const data = await fetchList({ pg: cursor.page, t, year: '' });
+      pagecount = Number(data.pagecount) || 1;
+      processed += 1;
+    }
+    if (cursor.page >= pagecount) {
+      cursor = { ci: (cursor.ci + 1) % COLLECT_CATS.length, page: 1 };
+      if (cursor.ci === 0) cycleDone = true;
+    } else {
+      cursor = { ci: cursor.ci, page: cursor.page + 1 };
+    }
+  }
+  const total = (Number(settings.collect_total) || 0) + processed;
+  await adminStore.updateSettings({
+    collect_cursor: JSON.stringify(cursor),
+    collect_last_run: String(Date.now()),
+    collect_total: String(total),
+  });
+  return { processed, skipped, cursor, cycleDone, total };
+}
+
 function tvboxConfig(base) {
   return {
     name: '趣影',
@@ -1276,6 +1479,29 @@ async function handleAdmin(req, res, p, url) {
     return;
   }
 
+  // 采集接口：允许后台会话，或用采集密钥（供 GitHub Actions 定时调用）
+  if (p === '/api/admin/collect' && (method === 'POST' || method === 'GET')) {
+    let body = {};
+    if (method === 'POST') {
+      try { body = await readJsonBody(req); } catch { body = {}; }
+    }
+    if (!await adminToken(req)) {
+      const settings = await adminStore.getSettings();
+      const expected = String(settings.collect_token || '');
+      const given = String(body.token || url.searchParams.get('token') || '');
+      if (!expected || given !== expected) {
+        sendJson(res, 401, { ok: false, error: '采集密钥无效' });
+        return;
+      }
+    }
+    const result = await collectBatch({
+      pages: body.pages || url.searchParams.get('pages'),
+      force: body.force === true || url.searchParams.get('force') === '1',
+    });
+    sendJson(res, 200, { ok: true, ...result });
+    return;
+  }
+
   const token = await adminToken(req);
   if (!token) {
     sendJson(res, 401, { ok: false, error: '请先登录' });
@@ -1303,9 +1529,58 @@ async function handleAdmin(req, res, p, url) {
       sendJson(res, 200, { ok: true, data: await adminStore.getSettings() });
       return;
     }
+    if (p === '/api/admin/categories' && method === 'GET') {
+      sendJson(res, 200, { ok: true, list: CLASSES });
+      return;
+    }
     if (p === '/api/admin/settings' && method === 'PUT') {
       const body = await readJsonBody(req);
-      sendJson(res, 200, { ok: true, data: await adminStore.updateSettings(body) });
+      const data = await adminStore.updateSettings(body);
+      resetInsights();
+      sendJson(res, 200, { ok: true, data });
+      return;
+    }
+
+    // ---- 手动影片 ----
+    if (p === '/api/admin/videos' && method === 'GET') {
+      sendJson(res, 200, { ok: true, list: await adminStore.listManualVods() });
+      return;
+    }
+    if (p === '/api/admin/videos' && method === 'POST') {
+      const body = await readJsonBody(req);
+      const vod = normalizeManualVod(body);
+      await adminStore.saveManualVod(vod);
+      resetInsights();
+      sendJson(res, 200, { ok: true, data: vod });
+      return;
+    }
+    const videoMatch = p.match(/^\/api\/admin\/videos\/(manual-[a-z0-9]{4,24})$/);
+    if (videoMatch && method === 'DELETE') {
+      await adminStore.deleteManualVod(videoMatch[1]);
+      resetInsights();
+      sendJson(res, 200, { ok: true, deleted: true });
+      return;
+    }
+
+    // ---- 采集状态与密钥 ----
+    if (p === '/api/admin/collect/status' && method === 'GET') {
+      const settings = await adminStore.getSettings();
+      sendJson(res, 200, {
+        ok: true,
+        data: {
+          cursor: parseCollectCursor(settings.collect_cursor),
+          token: String(settings.collect_token || ''),
+          total: Number(settings.collect_total) || 0,
+          lastRun: Number(settings.collect_last_run) || 0,
+          categories: COLLECT_CATS.length,
+        },
+      });
+      return;
+    }
+    if (p === '/api/admin/collect/token' && method === 'POST') {
+      const tokenValue = crypto.randomBytes(16).toString('hex');
+      await adminStore.updateSettings({ collect_token: tokenValue });
+      sendJson(res, 200, { ok: true, token: tokenValue });
       return;
     }
 
@@ -1558,32 +1833,26 @@ export async function requestHandler(req, res) {
           t: url.searchParams.get('t'),
           year: parseYear(url.searchParams.get('year')),
         });
-        sendJson(res, 200, listPayload(data, base, false));
+        sendJson(res, 200, await publicListPayload(data, base, false, {
+          t: url.searchParams.get('t'),
+          year: parseYear(url.searchParams.get('year')),
+        }));
         return;
       }
       if (p === '/api/vod/search') {
         const wd = (url.searchParams.get('wd') || '').trim();
         if (!wd) { sendJson(res, 400, { ok: false, error: 'wd is required' }); return; }
         const data = await fetchSearch(wd.slice(0, 60), url.searchParams.get('pg'));
-        sendJson(res, 200, listPayload(data, base, false));
+        sendJson(res, 200, await publicListPayload(data, base, false, { wd }));
         return;
       }
       const ids = (url.searchParams.get('ids') || '').trim();
-      if (!/^(?:\d{1,10}|4kcz-\d{1,8})(?:,(?:\d{1,10}|4kcz-\d{1,8})){0,19}$/.test(ids)) {
+      if (!/^(?:(?:\d{1,10}|4kcz-\d{1,8})|manual-[a-z0-9]{4,24})(?:,(?:(?:\d{1,10}|4kcz-\d{1,8})|manual-[a-z0-9]{4,24})){0,19}$/.test(ids)) {
         sendJson(res, 400, { ok: false, error: 'ids is required' });
         return;
       }
       const rows = await fetchDetail(ids);
-      sendJson(res, 200, {
-        code: 1,
-        msg: '数据列表',
-        page: 1,
-        pagecount: 1,
-        limit: PAGE_SIZE,
-        total: rows.length,
-        list: rows.map((v) => normalizeItem(v, base, true)).filter(Boolean),
-        class: CLASSES,
-      });
+      sendJson(res, 200, await publicDetailPayload(rows, base, true));
       return;
     } catch (e) {
       sendJson(res, 502, { code: 0, msg: String(e.message || e), list: [] });
@@ -1597,18 +1866,14 @@ export async function requestHandler(req, res) {
     const ids = (url.searchParams.get('ids') || '').trim();
     const wd = (url.searchParams.get('wd') || '').trim();
     try {
-      if (ac === 'detail' && /^(?:\d{1,10}|4kcz-\d{1,8})(?:,(?:\d{1,10}|4kcz-\d{1,8})){0,19}$/.test(ids)) {
+      if (ac === 'detail' && /^(?:(?:\d{1,10}|4kcz-\d{1,8})|manual-[a-z0-9]{4,24})(?:,(?:(?:\d{1,10}|4kcz-\d{1,8})|manual-[a-z0-9]{4,24})){0,19}$/.test(ids)) {
         const rows = await fetchDetail(ids);
-        sendJson(res, 200, {
-          code: 1, msg: '数据列表', page: 1, pagecount: 1, limit: PAGE_SIZE, total: rows.length,
-          list: rows.map((v) => normalizeItem(v, base, true)).filter(Boolean),
-          class: CLASSES,
-        });
+        sendJson(res, 200, await publicDetailPayload(rows, base, true));
         return;
       }
       if (ac === 'detail' && wd) {
         const data = await fetchSearch(wd.slice(0, 60), url.searchParams.get('pg'), true);
-        sendJson(res, 200, listPayload(data, base, true));
+        sendJson(res, 200, await publicListPayload(data, base, true, { wd }));
         return;
       }
       if (ac === 'detail') {
@@ -1618,7 +1883,10 @@ export async function requestHandler(req, res) {
           year: parseYear(url.searchParams.get('year')),
           withPlay: true,
         });
-        sendJson(res, 200, listPayload(data, base, true));
+        sendJson(res, 200, await publicListPayload(data, base, true, {
+          t: url.searchParams.get('t'),
+          year: parseYear(url.searchParams.get('year')),
+        }));
         return;
       }
       const data = await fetchList({
@@ -1626,7 +1894,10 @@ export async function requestHandler(req, res) {
         t: url.searchParams.get('t'),
         year: parseYear(url.searchParams.get('year')),
       });
-      sendJson(res, 200, listPayload(data, base, false));
+      sendJson(res, 200, await publicListPayload(data, base, false, {
+        t: url.searchParams.get('t'),
+        year: parseYear(url.searchParams.get('year')),
+      }));
       return;
     } catch (e) {
       sendJson(res, 502, { code: 0, msg: String(e.message || e), list: [], class: CLASSES });
