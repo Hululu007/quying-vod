@@ -1,0 +1,78 @@
+// 数据层工厂：统一对外暴露异步接口。
+// - 配置 MYSQL_HOST/MYSQL_USER/MYSQL_DATABASE 时使用外部 MySQL，实现跨实例/跨重启持久化；
+// - 否则回退到本地 SQLite（仅单进程、重启即丢失），保证无外部依赖时仍可运行。
+// - 设置 DISABLE_DB=1 可完全禁用数据库，所有请求实时回源，后台功能不可用。
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+const ADMIN_METHODS = [
+  'getSettings', 'updateSettings', 'verifyPassword', 'setPassword',
+  'createSession', 'validateSession', 'destroySession',
+  'listAds', 'publicAds', 'createAd', 'updateAd', 'deleteAd',
+  'generateCards', 'listCards', 'exportCards', 'setCardStatus', 'deleteCard',
+  'verifyCard', 'overview',
+];
+
+function wrapCatalogSync(sqlite) {
+  return {
+    getQuery: (key) => sqlite.getQuery(key),
+    saveQuery: (key, value, ttl) => sqlite.saveQuery(key, value, ttl),
+    searchVods: (wd, page, withPlay) => sqlite.searchVods(wd, page, withPlay),
+    close: () => { try { sqlite.close(); } catch {} },
+  };
+}
+
+function wrapAdminSync(sqlite) {
+  const out = {};
+  for (const method of ADMIN_METHODS) {
+    out[method] = (...args) => sqlite[method](...args);
+  }
+  return out;
+}
+
+export async function initStores({ initialPassword, moduleDir } = {}) {
+  // 完全禁用数据库模式：不持久化、不缓存、后台不可用
+  if (process.env.DISABLE_DB === '1') {
+    throw new Error('Database disabled via DISABLE_DB=1');
+  }
+
+  const { mysqlConfigured, createMysqlPool, MysqlCatalogStore, MysqlAdminStore } = await import('./mysql-store.mjs');
+  if (mysqlConfigured()) {
+    const pool = createMysqlPool();
+    const catalogStore = new MysqlCatalogStore(pool);
+    await catalogStore.initSchema();
+    const adminStore = new MysqlAdminStore(pool, { initialPassword });
+    await adminStore.init();
+    return {
+      catalogStore,
+      adminStore,
+      backend: 'mysql',
+      close: async () => { try { await pool.end(); } catch {} },
+    };
+  }
+
+  // ---- SQLite 降级 ----
+  const { CatalogStore, defaultDatabasePath } = await import('./catalog-store.mjs');
+  const preferred = process.env.VOD_DB_PATH
+    ? path.resolve(process.env.VOD_DB_PATH)
+    : defaultDatabasePath(moduleDir);
+  let databasePath = preferred;
+  try {
+    fs.mkdirSync(path.dirname(preferred), { recursive: true });
+    databasePath = preferred;
+  } catch {
+    databasePath = path.join(os.tmpdir(), 'quying', 'catalog.db');
+  }
+  const sqliteCatalog = new CatalogStore(databasePath);
+  let adminStore = null;
+  const { AdminStore } = await import('./admin-store.mjs');
+  adminStore = new AdminStore(databasePath, { initialPassword });
+  return {
+    catalogStore: wrapCatalogSync(sqliteCatalog),
+    adminStore: wrapAdminSync(adminStore),
+    backend: 'sqlite',
+    databasePath,
+    close: () => { try { sqliteCatalog.close(); } catch {} },
+  };
+}

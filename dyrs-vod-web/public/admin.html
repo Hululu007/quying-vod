@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>趣影 · 站点后台</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="stylesheet" href="/admin.css?v=20261120b" />
+</head>
+<body>
+  <div id="loginView" class="login-wrap hidden">
+    <form class="login-card" id="loginForm" autocomplete="off">
+      <div class="login-logo">🎬</div>
+      <h1>趣影 · 站点后台</h1>
+      <p class="muted">输入管理员密码后进入控制台</p>
+      <input type="password" id="loginPassword" placeholder="管理员密码" autocomplete="current-password" />
+      <button class="btn" type="submit">登录</button>
+      <p class="form-error" id="loginErr"></p>
+      <a class="muted login-back" href="/">← 返回前台</a>
+    </form>
+  </div>
+
+  <div id="adminView" class="admin-shell hidden">
+    <aside class="side">
+      <div class="side-brand">🎬 <span>趣影后台</span></div>
+      <nav class="side-nav">
+        <button class="side-link active" data-tab="overview">概览</button>
+        <button class="side-link" data-tab="ads">广告位</button>
+        <button class="side-link" data-tab="cards">卡密</button>
+        <button class="side-link" data-tab="settings">站点与授权</button>
+      </nav>
+      <div class="side-foot">
+        <a class="side-link" href="/" target="_blank" rel="noopener">打开前台 ↗</a>
+        <button class="side-link" id="logoutBtn">退出登录</button>
+      </div>
+    </aside>
+    <main class="content">
+      <header class="content-head">
+        <div>
+          <h2 id="pageTitle">概览</h2>
+          <p class="muted" id="pageSub">站点运行状态一览</p>
+        </div>
+        <span class="live-dot"><i></i> 已登录</span>
+      </header>
+      <section id="panel" class="panel-slot"></section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/admin.js?v=20261120b" defer></script>
+</body>
+</html>

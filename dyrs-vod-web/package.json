@@ -1,0 +1,18 @@
+{
+  "name": "dyrs-vod-web",
+  "version": "1.0.0",
+  "description": "Web frontend for the dyrs-vod TVBox / MacCMS compatible VOD API",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "better-sqlite3": "11.10.0",
+    "mysql2": "^3.24.6"
+  }
+}

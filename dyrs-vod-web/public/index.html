@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>趣影 · 在线点播</title>
+  <meta name="description" content="趣影在线点播：影视搜索、分类筛选、影片详情、TVBox 配置。" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="stylesheet" href="/styles.css?v=20261120c" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">🎬</span>
+      <div class="brand-text">
+        <h1>趣影</h1>
+        <span class="subtitle">高清影视 · 即搜即看</span>
+      </div>
+    </div>
+    <nav class="nav">
+      <a href="#" data-view="home" class="nav-link active">首页</a>
+      <a href="#" data-view="search" class="nav-link">搜索</a>
+      <a href="#" data-view="tvbox" class="nav-link">TVBox</a>
+      <a href="#" data-view="docs" class="nav-link">API</a>
+    </nav>
+    <span class="status-pill" id="statusPill">检测中…</span>
+  </header>
+
+  <div class="nav-ad-bar hidden" id="navAdBar"></div>
+
+  <main id="app">
+    <!-- 动态渲染 -->
+  </main>
+
+  <div id="modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-card" id="modalCard"></div>
+  </div>
+
+  <footer class="footer">
+    <p>本站仅聚合公开影视元数据与播放源信息，不存储任何影片文件。数据来源于公开接口，仅供学习交流。</p>
+    <p class="footer-links"><a href="/admin">站点管理</a></p>
+  </footer>
+
+  <script src="/app.js?v=20261120c" defer></script>
+</body>
+</html>
