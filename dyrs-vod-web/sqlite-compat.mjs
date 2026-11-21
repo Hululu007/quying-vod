@@ -1,23 +1,11 @@
-// SQLite 兼容层：优先使用 Node 内置的 node:sqlite（Node 22.5+，无需原生编译），
-// 不可用时回退到 better-sqlite3（Node 20 等老运行时）。
-// 对外暴露与 better-sqlite3 相同的 Database 用法：pragma / exec / prepare / transaction / close。
-import { createRequire } from 'node:module';
+// SQLite 驱动封装：基于 Node 内置的 node:sqlite（Node 24+ 稳定），
+// 提供与 better-sqlite3 一致的 pragma / exec / prepare / transaction 接口，
+// 无需任何原生模块编译，本地与 Vercel 行为一致。
+import { DatabaseSync } from 'node:sqlite';
 
-const require = createRequire(import.meta.url);
-
-function loadNodeSqlite() {
-  try {
-    const sqlite = require('node:sqlite');
-    return sqlite && typeof sqlite.DatabaseSync === 'function' ? sqlite : null;
-  } catch {
-    return null;
-  }
-}
-
-class NodeSqliteDatabase {
+export default class SqliteDatabase {
   constructor(filename) {
-    const sqlite = loadNodeSqlite();
-    this.db = new sqlite.DatabaseSync(filename);
+    this.db = new DatabaseSync(filename);
   }
 
   pragma(statement) {
@@ -57,13 +45,3 @@ class NodeSqliteDatabase {
     this.db.close();
   }
 }
-
-function loadDatabase() {
-  if (loadNodeSqlite()) return NodeSqliteDatabase;
-  const mod = require('better-sqlite3');
-  return mod && mod.default ? mod.default : mod;
-}
-
-const Database = loadDatabase();
-
-export default Database;

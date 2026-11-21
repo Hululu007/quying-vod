@@ -1,3 +1,4 @@
+# 旧平台入口，仅作参考；正式部署在 Vercel（见 AGENTS.md）
 [project]
 sub_id = "e6f311f5"
 name = "dyrs-vod"
@@ -11,7 +12,7 @@ preview_enable = "disabled"
 
 [deploy]
 build = ["bash", "dyrs-vod-web/build.sh"]
-run = ["bash", "dyrs-vod-web/run.sh", "-p", "5000"]
+run = ["bash", "dyrs-vod-web/run.sh", "-p", "8000"]
 
 [deploy.profile]
 kind = "service"

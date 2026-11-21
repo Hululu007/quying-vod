@@ -1,4 +1,4 @@
-// 趣影外部 PostgreSQL 数据层：与 mysql-store.mjs 完全等价（异步接口、同样的表结构与语义），
+// 趣影外部 PostgreSQL 数据层：异步接口，表结构与本地 SQLite 版保持一致，
 // 供 Vercel + Neon 等环境使用。连接串优先读 DATABASE_URL，其次 POSTGRES_URL / POSTGRES_URL_NON_POOLING；
 // 也可用 PGHOST/PGUSER/PGPASSWORD/PGDATABASE 组合配置。
 // 实现后台设置、广告、卡密、会话与目录缓存的跨实例/跨重启持久化。
@@ -83,7 +83,7 @@ function randomCode(prefix = 'QY') {
   return `${prefix}-${seg()}-${seg()}-${seg()}`;
 }
 function hashPassword(password) {
-  // 与 admin-store.mjs / mysql-store.mjs 保持同格式：scrypt$salt$hash，避免迁移后旧密码失效。
+  // 与 admin-store.mjs 保持同格式：scrypt$salt$hash，避免迁移后旧密码失效。
   const salt = crypto.randomBytes(16).toString('hex');
   const hash = crypto.scryptSync(String(password), salt, 64).toString('hex');
   return `scrypt$${salt}$${hash}`;

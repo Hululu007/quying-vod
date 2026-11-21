@@ -1,12 +1,9 @@
-// quying: a zero-dependency Node.js 20 web frontend for the Quying VOD catalog.
-// Content is read straight from the public MacCMS API behind the dyrs360.cc
-// skin (暴风资源, bfzy.tv) instead of scraping the anti-bot protected mirrors.
-// Every response is normalised: upstream names become 趣影, posters go through
-// a same-origin proxy when possible, and playback links stay on this site.
+// 趣影 VOD 聚合服务：适配 4K 站（HTML）与暴风站（MacCMS JSON API），
+// 输出统一的 TVBox / MacCMS 兼容接口。列表与详情来自上游公开页面，
+// 播放地址实时解析且不落库；海报按需走同源代理。
 import http from 'node:http';
 import https from 'node:https';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -20,9 +17,9 @@ try {
   const stores = await initStores({ initialPassword: process.env.ADMIN_PASSWORD, moduleDir: __dirname });
   catalogStore = stores.catalogStore;
   adminStore = stores.adminStore;
-  if (stores.backend === 'mysql') {
-    console.log('[quying] using external MySQL for persistence');
-  } else if (stores.backend === 'sqlite') {
+  if (stores.backend === 'postgres') {
+    console.log('[quying] using external PostgreSQL for persistence');
+  } else {
     console.warn('[quying] using local SQLite (non-persistent across restarts)');
     if (!process.env.ADMIN_PASSWORD) {
       console.warn('[quying] admin 默认密码 admin123，请登录 /admin 后立即修改');
@@ -685,18 +682,6 @@ async function fetchFourkDetail(id) {
     const html = await fourkFetch(baseHost, `/movie/${match[1]}.html`, deadline);
     return parseFourkDetail(html, baseHost, id);
   });
-}
-
-function fourkCachedTitle(id) {
-  for (const entry of fourkCache.values()) {
-    const value = entry.value;
-    if (value && value.vod_id === id) return value;
-    if (value && Array.isArray(value.list)) {
-      const row = value.list.find((item) => item.vod_id === id);
-      if (row) return row;
-    }
-  }
-  return null;
 }
 
 function parsePage(value) {

@@ -1,7 +1,6 @@
 // 数据层工厂：统一对外暴露异步接口。
 // - 配置 DATABASE_URL / POSTGRES_URL / POSTGRES_URL_NON_POOLING（或 PG* 变量）时使用外部 PostgreSQL；
-// - 否则配置 MYSQL_HOST/MYSQL_USER/MYSQL_DATABASE 时使用外部 MySQL；
-// - 两者都没有时回退到本地 SQLite（仅单进程、重启即丢失），保证无外部依赖时仍可运行。
+// - 否则回退到本地 SQLite（挂载在 Node 内置 node:sqlite 上，单进程、重启即丢失）。
 // - 设置 DISABLE_DB=1 可完全禁用数据库，所有请求实时回源，后台功能不可用。
 import fs from 'node:fs';
 import os from 'node:os';
@@ -38,7 +37,7 @@ export async function initStores({ initialPassword, moduleDir } = {}) {
     throw new Error('Database disabled via DISABLE_DB=1');
   }
 
-  // PostgreSQL 优先（Vercel + Neon 等托管环境），其次 MySQL，最后本地 SQLite。
+  // PostgreSQL 优先（Vercel + Neon 等托管环境），否则回退本地 SQLite。
   const { postgresConfigured, createPostgresPool, PgCatalogStore, PgAdminStore } = await import('./pg-store.mjs');
   if (postgresConfigured()) {
     const pool = createPostgresPool();
@@ -50,21 +49,6 @@ export async function initStores({ initialPassword, moduleDir } = {}) {
       catalogStore,
       adminStore,
       backend: 'postgres',
-      close: async () => { try { await pool.end(); } catch {} },
-    };
-  }
-
-  const { mysqlConfigured, createMysqlPool, MysqlCatalogStore, MysqlAdminStore } = await import('./mysql-store.mjs');
-  if (mysqlConfigured()) {
-    const pool = createMysqlPool();
-    const catalogStore = new MysqlCatalogStore(pool);
-    await catalogStore.initSchema();
-    const adminStore = new MysqlAdminStore(pool, { initialPassword });
-    await adminStore.init();
-    return {
-      catalogStore,
-      adminStore,
-      backend: 'mysql',
       close: async () => { try { await pool.end(); } catch {} },
     };
   }
