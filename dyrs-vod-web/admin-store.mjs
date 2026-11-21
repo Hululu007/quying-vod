@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import Database from 'better-sqlite3';
+import Database from './sqlite-compat.mjs';
 
 const DEFAULT_SETTINGS = {
   site_name: '趣影',

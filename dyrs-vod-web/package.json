@@ -5,14 +5,16 @@
   "type": "module",
   "private": true,
   "engines": {
-    "node": "20.x"
+    "node": ">=20"
   },
   "scripts": {
     "start": "node server.mjs"
   },
   "license": "MIT",
   "dependencies": {
-    "better-sqlite3": "11.10.0",
     "mysql2": "^3.24.6"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "11.10.0"
   }
 }

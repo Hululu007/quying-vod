@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import Database from 'better-sqlite3';
+import Database from './sqlite-compat.mjs';
 
 const MEDIA_RE = /\.(m3u8|mp4|m4v|mpd)(?:[?#]|$)/i;
 const EPISODE_PAGE_RE = /^\/v_play\/[A-Za-z0-9_=-]+\.html$/;
