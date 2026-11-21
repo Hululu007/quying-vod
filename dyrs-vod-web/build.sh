@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 
 rm -rf dist
 mkdir -p dist
-cp package.json package-lock.json server.mjs catalog-store.mjs admin-store.mjs mysql-store.mjs db-layer.mjs dist/
+cp package.json package-lock.json server.mjs catalog-store.mjs admin-store.mjs mysql-store.mjs pg-store.mjs db-layer.mjs dist/
 cp -R public dist/public
 cp run.sh dist/run.sh
 chmod 755 dist/run.sh
