@@ -162,6 +162,10 @@ function sendJsonCacheable(res, status, data, { maxAge = 30, sMaxAge = 300, stal
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, OPTIONS',
     'Cache-Control': `public, max-age=${maxAge}, s-maxage=${sMaxAge}, stale-while-revalidate=${stale}`,
+    // Vercel 边缘会消费并剥掉 Cache-Control 里的 s-maxage / stale-while-revalidate 再转发，
+    // 导致下游 Cloudflare 看不到缓存指令（cf-cache-status 一直是 DYNAMIC）。
+    // 用 Cloudflare 专用头让 CF 边缘也缓存，且不影响浏览器与 Vercel 自身缓存。
+    'Cloudflare-CDN-Cache-Control': `max-age=${sMaxAge}, stale-while-revalidate=${stale}`,
   });
   res.end(body);
 }
