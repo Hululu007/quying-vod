@@ -1668,6 +1668,9 @@ if (!process.env.VERCEL) {
   });
 }
 
+// Vercel 要求入口模块的默认导出是函数或 server
+export default requestHandler;
+
 process.on('uncaughtException', (e) => {
   console.error('[quying] uncaughtException:', (e && e.message) || e);
 });

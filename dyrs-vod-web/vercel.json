@@ -5,6 +5,10 @@
     "api/vercel.mjs": {
       "includeFiles": "public/**",
       "maxDuration": 60
+    },
+    "server.mjs": {
+      "includeFiles": "public/**",
+      "maxDuration": 60
     }
   }
 }
