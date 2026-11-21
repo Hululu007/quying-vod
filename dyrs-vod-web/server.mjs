@@ -1242,7 +1242,8 @@ function readJsonBody(req, limit = 64 * 1024) {
 
 function sameOrigin(req) {
   const origin = req.headers.origin;
-  if (!origin) return true;
+  // 浏览器同源请求（含 fetch 的 PUT/POST）一定带 Origin，缺失即视为不可信
+  if (!origin) return false;
   try { return new URL(origin).host === String(req.headers.host || ''); } catch { return false; }
 }
 
