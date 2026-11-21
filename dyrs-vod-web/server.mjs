@@ -1633,6 +1633,12 @@ export async function requestHandler(req, res) {
     }
   }
 
+  // 未匹配的 API 路径必须返回 JSON 404，不能落到前端页面
+  if (p.startsWith('/api')) {
+    sendJson(res, 404, { ok: false, error: 'not found' });
+    return;
+  }
+
   // Static frontend
   let rel = decodeURIComponent(p);
   if (rel === '/' || rel === '') rel = '/index.html';
