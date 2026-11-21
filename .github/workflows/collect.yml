@@ -11,10 +11,10 @@ jobs:
     steps:
       - name: Trigger batch collect
         env:
-          COLLECT_TOKEN: ${{"{"} secrets.COLLECT_TOKEN }}
-          SITE_URL: ${{"{"} secrets.SITE_URL }}
+          COLLECT_TOKEN: ${{ secrets.COLLECT_TOKEN }}
+          SITE_URL: ${{ secrets.SITE_URL }}
         run: |
-          BASE="${{"{"}SITE_URL:-https://quying-vod.vercel.app}}"
+          BASE="${{SITE_URL:-https://quying-vod.vercel.app}}"
           if [ -z "$COLLECT_TOKEN" ]; then
             echo "COLLECT_TOKEN 未配置，跳过"
             exit 0
