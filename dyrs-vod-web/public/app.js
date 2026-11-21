@@ -206,11 +206,6 @@
 
   // ---- 站点配置 / 分类导航 ----
   const PRIMARY = CATEGORIES[0].items;
-  // 首页门户式快捷分类：参考 360kan 的主导航思路，但仍复用现有分类参数。
-  const PORTAL_CATS = [
-    { t: '', name: '首页' },
-    ...PRIMARY.filter((c) => c.t !== '').slice(0, 6),
-  ];
   let site = {
     name: '趣影', subtitle: '高清影视 · 即搜即看', notice: '', footer: '',
     adsEnabled: true, carouselInterval: 5000,
@@ -259,6 +254,14 @@
     return wrap;
   }
 
+  function viewMore(t) {
+    selectCategory(t);
+    requestAnimationFrame(() => {
+      const target = document.getElementById('listWrap') || document.getElementById('catNavHost');
+      if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  }
+
   function selectCategory(t) {
     state.t = t;
     state.pg = 1;
@@ -272,7 +275,6 @@
     }
     const hint = document.getElementById('filterHint');
     if (hint) hint.textContent = filterSummary();
-    syncPortalCats();
     loadList();
   }
 
@@ -441,24 +443,6 @@
     if (wrap) loadListInto(wrap);
   }
 
-  function portalCategoryNav() {
-    const row = el('div', { class: 'portal-cats' });
-    PORTAL_CATS.forEach((c) => {
-      row.appendChild(el('button', {
-        class: 'portal-cat' + (String(state.t) === String(c.t) ? ' active' : ''),
-        'data-t': String(c.t),
-        onclick: () => selectCategory(String(c.t)),
-      }, c.name));
-    });
-    return el('div', { class: 'portal-cat-bar' }, row);
-  }
-
-  function syncPortalCats() {
-    document.querySelectorAll('.portal-cat').forEach((b) => {
-      b.classList.toggle('active', b.dataset.t === String(state.t));
-    });
-  }
-
   function portalSection(title, desc, more) {
     const head = el('div', { class: 'section-title portal-title' }, [
       el('h3', {}, title),
@@ -476,8 +460,10 @@
     const { wrap, grid } = portalSection(title, desc, more);
     host.appendChild(wrap);
     try {
-      const query = new URLSearchParams({ pg: '1', ...params }).toString();
-      const data = await api(`/api/vod/list?${query}`);
+      const path = params && params.section
+        ? `/api/vod/kan?section=${encodeURIComponent(params.section)}&limit=${encodeURIComponent(params.limit || 12)}`
+        : `/api/vod/list?${new URLSearchParams({ pg: '1', ...params }).toString()}`;
+      const data = await api(path);
       const list = (Array.isArray(data.list) ? data.list : []).slice(0, 12);
       if (!list.length) { wrap.remove(); return; }
       clear(grid);
@@ -526,14 +512,6 @@
     app.appendChild(heroHost);
     loadHero(heroHost);
 
-    app.appendChild(portalCategoryNav());
-    const portalHost = el('div', { id: 'portalHost' });
-    app.appendChild(portalHost);
-    loadPortalSection('正在热播', '热度靠前，大家都在刷', { t: 'hot' }, { text: '查看更多', onclick: () => selectCategory('hot') });
-    loadPortalSection('高分必看', '评分清晰，先看口碑之作', { t: 'score' }, { text: '查看更多', onclick: () => selectCategory('score') });
-    loadPortalSection('最近上新', '更新时间靠前，不错过新内容', { t: 'new' }, { text: '查看更多', onclick: () => selectCategory('new') });
-    loadChannelPreview();
-
     app.appendChild(el('div', { class: 'search-strip' }, [
       el('div', { class: 'search-box' }, [
         el('input', { type: 'text', placeholder: '搜索影片名称，回车搜索…', id: 'heroSearch', onkeydown: (e) => { if (e.key === 'Enter') { state.q = e.target.value.trim(); setView('search'); } } }),
@@ -553,6 +531,15 @@
     app.appendChild(listWrap);
     app.appendChild(el('div', { id: 'pagerHost' }));
     loadListInto(listWrap);
+
+    const portalHost = el('div', { id: 'portalHost' });
+    app.appendChild(portalHost);
+    loadPortalSection('360首页推荐', '和 360kan 首页同步的推荐片单', { section: 'home', limit: 12 }, { text: '查看更多', onclick: () => viewMore('') });
+    loadPortalSection('电视剧推荐', '360kan 栏目里的电视剧热推', { section: 'tv', limit: 12 }, { text: '查看更多', onclick: () => viewMore('2') });
+    loadPortalSection('电影推荐', '360kan 栏目里的电影热推', { section: 'movie', limit: 12 }, { text: '查看更多', onclick: () => viewMore('1') });
+    loadPortalSection('综艺推荐', '360kan 栏目里的综艺热推', { section: 'variety', limit: 12 }, { text: '查看更多', onclick: () => viewMore('3') });
+    loadPortalSection('动漫推荐', '360kan 栏目里的动漫热推', { section: 'anime', limit: 12 }, { text: '查看更多', onclick: () => viewMore('4') });
+    loadChannelPreview();
   }
 
   async function loadListInto(wrap) {
@@ -857,6 +844,15 @@
     row.appendChild(copyBtn);
     panel.appendChild(row);
 
+    panel.appendChild(el('h3', { style: 'margin-top:18px' }, '使用说明'));
+    panel.appendChild(el('ul', { style: 'font-size:13px;color:var(--text-dim);line-height:1.9;padding-left:20px;margin:6px 0 0' }, [
+      el('li', {}, '配置为 MacCMS 兼容源，接口为 '),
+      el('li', {}, '支持分类筛选与二级分类、搜索、详情；播放地址由本站实时解析为短时有效的 m3u8。'),
+      el('li', {}, '播放源：详情中「趣影一线」为暴风源，「趣影二线」为 4K 源；详情页也可在 Web 端直接播放。'),
+      el('li', {}, '如播放器无法加载，请确认配置地址可公网访问，且当前部署域名与 PUBLIC_URL 一致。'),
+    ]));
+    const apiLi = panel.querySelector('ul li');
+    if (apiLi) apiLi.appendChild(el('code', {}, '/api.php/provide/vod'));
     panel.appendChild(el('h3', { style: 'margin-top:18px' }, 'tvbox.json 内容'));
     const pre = el('pre', { class: 'json' }, '加载中…');
     panel.appendChild(pre);
@@ -876,6 +872,7 @@
       ['GET', '/api/health', '本站健康检查', '—'],
       ['GET', '/api/vod/tvbox', 'TVBox 配置 JSON', '—'],
       ['GET', '/api/vod/list', '影片列表', 'pg（页码）、t（分类，见下方）、year（可选）'],
+      ['GET', '/api/vod/kan', '360kan 首页/栏目推荐（匹配本站可播片源）', 'section（home/movie/tv/variety/anime）、limit（1–30，默认 12）'],
       ['GET', '/api/vod/search', '搜索', 'wd（关键词）'],
       ['GET', '/api/vod/detail', '影片详情', 'ids（影片 ID）'],
       ['GET', '/api/vod/channels', '创意频道清单', '—'],
@@ -911,6 +908,8 @@
         '播放源：详情 vod_play_from 中「趣影一线」为暴风源，「趣影二线」为 4K 源；4K 源可用时会自动按片名+年份匹配合并，vod_play_url 以 $$$ 与之一一对应。'),
       el('p', { style: 'font-size:13px;color:var(--text-dim);line-height:1.8' },
         '创意频道：/api/vod/channels 返回频道清单（高分榜、口碑榜、猜你喜欢、影视系列、明星频道、国漫）。频道片源优先从本站数据库筛选，不足时自动采集并入库；高分榜/口碑榜评分来自采集站点，非豆瓣官方数据。id=guess 需 POST JSON：seeds（最近浏览的影片 ID，≤5 个）、exclude（需排除的 ID，≤20 个），无有效种子时回退口碑榜；该接口响应为 no-store，浏览记录不上共享缓存。'),
+      el('p', { style: 'font-size:13px;color:var(--text-dim);line-height:1.8' },
+        '360kan 推荐：/api/vod/kan 采集 360kan 首页（section=home）与各栏目（movie/tv/variety/anime）的推荐标题，再用片名精确匹配本站已有 4K / 暴风片源，返回的 vod_id 均为本站可播放 ID；360kan 仅作推荐标题来源，不直接播放。全部匹配失败时回退为对应分类列表（source=fallback）。'),
     ]));
   }
 

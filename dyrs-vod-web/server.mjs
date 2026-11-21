@@ -1142,6 +1142,107 @@ async function fetchSearch(wd, pg, withPlay) {
   );
 }
 
+// ---- 360kan 首页/栏目推荐：只采集标题，再匹配本站片源；播放仍走现有 4K/暴风源 ----
+const KAN_API_BASE = 'https://api.web.360kan.com/v1';
+const KAN_SECTIONS = {
+  home: { title: '360首页推荐', cat: null, rankCat: null, ourType: '' },
+  movie: { title: '电影推荐', cat: '1', rankCat: 2, ourType: '1' },
+  tv: { title: '电视剧推荐', cat: '2', rankCat: 3, ourType: '2' },
+  variety: { title: '综艺推荐', cat: '3', rankCat: 4, ourType: '3' },
+  anime: { title: '动漫推荐', cat: '4', rankCat: 5, ourType: '4' },
+};
+const KAN_CANDIDATE_LIMIT = 30;
+const KAN_TITLE_CACHE = new Map();
+
+async function fetchKanJson(url) {
+  const resp = await httpGetText(url, {
+    timeout: UPSTREAM_TIMEOUT_MS,
+    headers: {
+      'User-Agent': UA,
+      Referer: 'https://www.360kan.com/',
+      Accept: 'application/json,text/plain,*/*',
+      'Accept-Encoding': 'identity',
+    },
+  });
+  if (resp.status < 200 || resp.status >= 300) throw new Error(`360kan request failed: ${resp.status}`);
+  let json;
+  try { json = JSON.parse(resp.body.toString('utf8')); } catch { throw new Error('360kan invalid json'); }
+  if (json && json.errno !== 0) throw new Error(`360kan error: ${json.msg || 'unknown'}`);
+  return json;
+}
+
+async function fetchKanBlock(blockid, size) {
+  const url = `${KAN_API_BASE}/block?blockid=${encodeURIComponent(blockid)}&size=${Math.max(1, Number(size) || KAN_CANDIDATE_LIMIT)}`;
+  const json = await fetchKanJson(url);
+  const list = json && json.data && Array.isArray(json.data.lists) ? json.data.lists : [];
+  return list.filter((item) => item && item.title);
+}
+
+async function fetchKanRank(cat, size) {
+  const url = `${KAN_API_BASE}/rank?cat=${encodeURIComponent(cat)}&size=${Math.max(1, Number(size) || KAN_CANDIDATE_LIMIT)}`;
+  const json = await fetchKanJson(url);
+  const list = Array.isArray(json && json.data) ? json.data : [];
+  return list.filter((item) => item && item.title);
+}
+
+async function findLocalExactVod(title) {
+  if (!catalogStore) return null;
+  try {
+    const data = await catalogStore.searchVods(title, 1, false);
+    const list = Array.isArray(data && data.list) ? data.list : [];
+    const key = titleKey(title);
+    return list.find((v) => titleKey(v.vod_name) === key) || null;
+  } catch (error) { catalogFailed(error); return null; }
+}
+
+async function resolveKanVod(item) {
+  const title = normalizedTitle(item && item.title);
+  const key = titleKey(title);
+  if (!key) return null;
+  if (KAN_TITLE_CACHE.has(key)) return KAN_TITLE_CACHE.get(key) || null;
+  let row = await findLocalExactVod(title);
+  if (!row) {
+    try {
+      const data = await fetchBfzySearch(title, 1, false);
+      const candidates = Array.isArray(data.list) ? data.list : [];
+      row = candidates.find((v) => titleKey(v.vod_name) === key) || null;
+    } catch {}
+  }
+  KAN_TITLE_CACHE.set(key, row || null);
+  return row;
+}
+
+async function collectKanRecommendations(section) {
+  const cfg = KAN_SECTIONS[section];
+  if (!cfg) throw new Error('unknown kan section');
+  const rows = section === 'home'
+    ? await fetchKanBlock(522, KAN_CANDIDATE_LIMIT)
+    : await fetchKanRank(cfg.rankCat, KAN_CANDIDATE_LIMIT);
+  const seeds = rows.filter((item) => !cfg.cat || String(item.cat || '') === cfg.cat);
+  const list = [];
+  const seen = new Set();
+  for (const item of seeds) {
+    if (list.length >= 12) break;
+    const row = await resolveKanVod(item);
+    if (!row) continue;
+    const id = String(row.vod_id);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    list.push(row);
+  }
+  if (!list.length) throw new Error('360kan recommendation unavailable');
+  return { page: 1, pagecount: 1, total: list.length, list, source: '360kan' };
+}
+
+async function fetchKanRecommendations(section, limit) {
+  const max = Math.max(1, Math.min(30, Number(limit) || 12));
+  return catalogQuery(
+    `kan:v1:${section}:${max}`,
+    TTL.list,
+    () => collectKanRecommendations(section).then((data) => ({ ...data, list: data.list.slice(0, max) })),
+  );
+}
+
 // ---- 创意频道：数据库筛选优先，不足时上游采集并自动入库 ----
 // 每个频道是一份「候选池快照」：去重排序后整池 saveQuery（所有候选自动 saveVod 入库），
 // 分页只从快照切片，避免逐页回源造成重复/漂移。采集统一走暴风 MacCMS（含演员/评分/热度字段）。
@@ -1305,6 +1406,12 @@ async function detailForPlay(id) {
 
 function normalizedTitle(value) {
   return String(value || '').normalize('NFKC').replace(/\s+/g, ' ').trim();
+}
+
+function titleKey(value) {
+  return normalizedTitle(value)
+    .toLowerCase()
+    .replace(/[\s:：·,，.。!！?？'’"“”()（）\-_/\\|【】\[\]{}]+/g, '');
 }
 
 function normalizedEpisode(value) {
@@ -2115,6 +2222,38 @@ export async function requestHandler(req, res) {
   }
 
   // ---- Frontend JSON API ----
+  if (p === '/api/vod/kan') {
+    const section = String(url.searchParams.get('section') || '');
+    const cfg = KAN_SECTIONS[section];
+    if (!cfg) { sendJson(res, 400, { ok: false, error: 'unknown kan section' }); return; }
+    try {
+      const limit = Math.max(1, Math.min(30, Number(url.searchParams.get('limit')) || 12));
+      const data = await fetchKanRecommendations(section, limit);
+      const payload = await publicListPayload(data, publicBase(req), false, { manual: false, t: cfg.ourType || undefined });
+      payload.source = '360kan';
+      payload.section = section;
+      sendJson(res, 200, payload);
+      return;
+    } catch {
+      try {
+        const fallback = await fetchListLive({ pg: 1, t: cfg.ourType || '', year: '', withPlay: false });
+        const payload = await publicListPayload(
+          { ...fallback, list: (fallback.list || []).slice(0, 12) },
+          publicBase(req),
+          false,
+          { manual: false, t: cfg.ourType || undefined },
+        );
+        payload.source = 'fallback';
+        payload.section = section;
+        sendJson(res, 200, payload);
+        return;
+      } catch (error) {
+        sendJson(res, 502, { ok: false, error: (error && error.message) || 'recommendation unavailable' });
+        return;
+      }
+    }
+  }
+
   if (p === '/api/vod/channels') {
     sendJson(res, 200, {
       code: 1,
