@@ -161,7 +161,7 @@
       statCard('影片缓存', data.vods, 'SQLite 已入库影片'),
       statCard('查询快照', data.queries, '列表 / 搜索 / 详情缓存'),
       statCard('轮播广告', `${data.carousel} / 5`, '首页顶部轮播位'),
-      statCard('导航广告', data.navAds, '顶部导航广告条'),
+      statCard('导航广告', `${data.navAds} / 5`, '导航栏文字链接'),
       statCard('卡密总数', data.cardsTotal, `未用 ${data.cards.unused} · 已用 ${data.cards.used}`),
     ]));
     panel.appendChild(el('div', { class: 'panel-card' }, [
@@ -179,13 +179,13 @@
   function adForm() {
     const form = el('form', { class: 'panel-card' }, [
       el('h3', {}, editingAdId ? `编辑广告 #${editingAdId}` : '新增广告'),
-      el('p', { class: 'desc' }, '轮播位最多 5 条，建议使用 16:9 高清图；导航位建议使用精简标题 + 小图标。'),
+      el('p', { class: 'desc' }, '轮播位最多 5 条，建议使用 16:9 高清图；导航位最多 5 条，标题即前台文字，点击跳转链接。'),
       el('div', { class: 'row' }, [
         el('div', { class: 'field' }, [
           el('label', {}, '广告位'),
           el('select', { id: 'adSlot' }, [
             el('option', { value: 'carousel' }, '首页轮播（5 图）'),
-            el('option', { value: 'nav' }, '顶部导航条'),
+            el('option', { value: 'nav' }, '顶部导航条（文字 5 条）'),
           ]),
         ]),
         el('div', { class: 'field' }, [

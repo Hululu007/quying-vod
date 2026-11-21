@@ -16,6 +16,7 @@ const DEFAULT_SETTINGS = {
 
 const AD_SLOTS = new Set(['carousel', 'nav']);
 const CAROUSEL_MAX = 5;
+const NAV_MAX = 5;
 const CARD_STATUS = new Set(['unused', 'used', 'disabled']);
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
@@ -205,6 +206,10 @@ export class AdminStore {
     if (ad.slot === 'carousel') {
       const count = this.db.prepare("SELECT count(*) AS n FROM ads WHERE slot = 'carousel' AND enabled = 1").get().n;
       if (count >= CAROUSEL_MAX) throw new Error(`轮播广告最多 ${CAROUSEL_MAX} 条，请先停用或删除旧广告`);
+    }
+    if (ad.slot === 'nav') {
+      const count = this.db.prepare("SELECT count(*) AS n FROM ads WHERE slot = 'nav' AND enabled = 1").get().n;
+      if (count >= NAV_MAX) throw new Error(`导航广告最多 ${NAV_MAX} 条，请先停用或删除旧广告`);
     }
     const info = this.db.prepare('INSERT INTO ads (slot, title, image, link, sort, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
       .run(ad.slot, ad.title, ad.image, ad.link, ad.sort, ad.enabled, now());

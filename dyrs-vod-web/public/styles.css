@@ -126,34 +126,21 @@ main { max-width: 1240px; margin: 0 auto; padding: 28px; }
 .section-title h3 { margin: 0; font-size: 18px; }
 .section-title .hint { font-size: 12px; color: var(--text-dim); }
 
-/* ---- 导航广告位（嵌在导航中间） ---- */
-.nav-ad-bar { display: flex; align-items: center; min-width: 0; }
+/* ---- 导航广告位（文字链接，最多 5 条） ---- */
+.nav-ad-bar { display: flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: wrap; }
 .nav-ad-bar.hidden { display: none; }
 .nav-ad {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  max-width: 300px;
-  padding: 6px 12px;
-  border: 1px dashed var(--border);
+  padding: 8px 14px;
   border-radius: 10px;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text-dim);
-  transition: color 0.2s, background 0.2s, border-color 0.2s;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: all 0.2s ease;
 }
-.nav-ad:hover { color: var(--text); background: var(--card); border-color: transparent; }
-.nav-ad img { height: 20px; width: auto; max-width: 90px; object-fit: contain; border-radius: 5px; }
-.nav-ad-text { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.nav-ad-badge {
-  flex: none;
-  font-size: 10px;
-  padding: 1px 6px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--text-dim);
-  letter-spacing: 0.08em;
-}
+.nav-ad:hover { color: var(--text); background: var(--card); }
 
 /* ---- 首页轮播 ---- */
 .hero-carousel { margin-bottom: 22px; }
@@ -496,8 +483,7 @@ table.docs code { color: #ffd28a; background: var(--bg); padding: 2px 6px; borde
   main { padding: 18px; }
   .hero { padding: 26px 20px; }
   .hero h2 { font-size: 24px; }
-  .nav-ad { max-width: 100%; font-size: 12px; }
-  .nav-ad-text { max-width: 180px; }
+  .nav-ad { max-width: 160px; font-size: 13px; padding: 7px 10px; }
   .carousel { height: 230px; border-radius: 16px; }
   .carousel-body { left: 20px; right: 20px; bottom: 36px; max-width: none; }
   .carousel-body h3 { font-size: 22px; }

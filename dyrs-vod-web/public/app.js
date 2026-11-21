@@ -330,27 +330,27 @@
     renderCarousel(host, items);
   }
 
-  // ---- 顶部导航广告 ----
+  // ---- 顶部导航广告（最多 5 条文字链接） ----
   async function loadNavAd() {
     const bar = document.getElementById('navAdBar');
     if (!bar || !site.adsEnabled) return;
     try {
       const data = await api('/api/ads?slot=nav');
-      const ad = (data.list || [])[0];
-      if (!ad) return;
+      const items = (data.list || []).slice(0, 5);
+      if (!items.length) return;
       bar.classList.remove('hidden');
       clear(bar);
-      bar.appendChild(el('a', {
-        class: 'nav-ad',
-        href: ad.link || '#',
-        target: ad.link && !ad.link.startsWith('/') ? '_blank' : '_self',
-        rel: 'noopener',
-        onclick: (e) => { if (!ad.link) e.preventDefault(); },
-      }, [
-        ad.image ? el('img', { src: ad.image, alt: ad.title || '推广' }) : null,
-        el('span', { class: 'nav-ad-text' }, ad.title || '推广位'),
-        el('span', { class: 'nav-ad-badge' }, 'AD'),
-      ].filter(Boolean)));
+      items.forEach((ad) => {
+        const href = ad.link || '';
+        bar.appendChild(el('a', {
+          class: 'nav-ad',
+          href: href || '#',
+          target: /^https?:\/\//i.test(href) ? '_blank' : '_self',
+          rel: 'noopener',
+          title: ad.title || '推广',
+          onclick: (e) => { if (!href) e.preventDefault(); },
+        }, ad.title || '推广'));
+      });
     } catch { /* 忽略 */ }
   }
 
