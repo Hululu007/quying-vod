@@ -2259,7 +2259,9 @@ export async function requestHandler(req, res) {
   }
 
   if (p === '/api/vod/tvbox') {
-    sendJsonCacheable(res, 200, tvboxConfig(base, extractCardCode(req, url)), { sMaxAge: 3600, maxAge: 60 });
+    // 非授权模式不把卡密写进配置，避免公开配置里泄露卡密
+    const code = REQUIRE_CARD ? extractCardCode(req, url) : '';
+    sendJsonCacheable(res, 200, tvboxConfig(base, code), { sMaxAge: 3600, maxAge: 60 });
     return;
   }
 

@@ -884,7 +884,8 @@
     const panel = el('div', { class: 'panel' });
     app.appendChild(panel);
     panel.appendChild(el('h3', {}, '配置地址'));
-    const card = cardCode();
+    // 非授权模式不携带卡密，避免配置地址里暴露卡密
+    const card = site.requireCard ? cardCode() : '';
     if (site.requireCard && !card) {
       panel.appendChild(el('div', { class: 'banner warn', style: 'margin-bottom:10px' }, '未检测到授权卡密：请先点击右上角「授权」输入卡密，否则配置地址无法加载片库。'));
     }
