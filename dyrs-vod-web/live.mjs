@@ -9,9 +9,14 @@ export const LIVE_GROUP_NAMES = ['央视', '卫视', '地方', '体育', '影视
 export const LIVE_EPG_URL = 'http://epg.51zmt.top:8000/e.xml';
 export const DEFAULT_LIVE_SOURCES = [
   { name: 'ZBDS', url: 'https://live.zbds.top/tv/iptv4.m3u' },
-  { name: 'vbskycn', url: 'https://gh-proxy.com/raw.githubusercontent.com/vbskycn/iptv/refs/heads/master/tv/iptv4.m3u' },
   { name: 'iptv-org', url: 'https://iptv-org.github.io/iptv/index.m3u' },
   { name: 'myIPTV', url: 'https://gh-proxy.org/raw.githubusercontent.com/suxuang/myIPTV/main/ipv4.m3u' },
+];
+
+// 已知完全不可用的源：vbskycn（gh-proxy.com 长期 403）、以及其它历史上连续挂掉的源。
+// 这些在 DEFAULT_LIVE_SOURCES 中直接移除，用户显式设置 LIVE_SOURCES 可以覆盖。
+export const DISABLED_LIVE_SOURCES = [
+  { name: 'vbskycn', url: 'https://gh-proxy.com/raw.githubusercontent.com/vbskycn/iptv/refs/heads/master/tv/iptv4.m3u', reason: 'gh-proxy.com 镜像持续 403，清单完全不可达' },
 ];
 
 // 可选本地 assets/ 兜底：用户可在 dyrs-vod-web/assets/ 或 public/assets/ 放置 .m3u 文件，
@@ -157,6 +162,19 @@ export function mergeLiveChannels(entries) {
       channel.lines.push({ url, source: String(entry.source || '').trim() || '直播源' });
     }
   }
+  // HTTP 混合内容 + 源健康度淘汰：
+  // 1) 如果一个频道有多线路且含 HTTPS，优先只留 HTTPS（生产 HTTPS 页面 HTTP 会被浏览器拦）
+  // 2) 如果一个频道只剩 HTTP 线路，保留下但后端代理兜底（/live-proxy.m3u8）
+  for (const channel of byName.values()) {
+    if (channel.lines.length > 1) {
+      const httpsLines = channel.lines.filter((l) => /^https:/i.test(l.url));
+      if (httpsLines.length > 0 && httpsLines.length < channel.lines.length) {
+        channel.lines = httpsLines;
+      }
+    }
+    // 每个频道最多保留 5 条线路（避免合并过多垃圾备选）
+    if (channel.lines.length > 5) channel.lines = channel.lines.slice(0, 5);
+  }
   const order = new Map(LIVE_GROUP_NAMES.map((name, index) => [name, index]));
   return [...byName.values()].sort((a, b) =>
     (order.get(a.group) ?? 99) - (order.get(b.group) ?? 99)
@@ -196,11 +214,12 @@ export function buildLiveM3U(channels) {
 }
 
 export class LiveCollector {
-  constructor({ sources = DEFAULT_LIVE_SOURCES, fetchText, ttl = 21600000 } = {}) {
+  constructor({ sources = DEFAULT_LIVE_SOURCES, fetchText, ttl = 21600000, disableLocal = false } = {}) {
     if (typeof fetchText !== 'function') throw new Error('fetchText is required');
     this.sources = sources;
     this.fetchText = fetchText;
     this.ttl = Math.max(0, Number(ttl) || 0);
+    this.disableLocal = disableLocal;
     this.snapshot = null;
     this.inflight = null;
     this.retryAfter = 0;
@@ -221,8 +240,7 @@ export class LiveCollector {
       }
     }));
     let allRemoteDown = false;
-    if (!entries.length) {
-      // 所有远端源均失败 — 尝试本地 assets/ 兜底
+    if (!entries.length && !this.disableLocal) {
       allRemoteDown = true;
       const local = readLocalLiveSources();
       for (const src of local) {

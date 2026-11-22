@@ -87,6 +87,7 @@ test('全部源失败且无旧快照时抛出错误', async () => {
   const collector = new live.LiveCollector({
     sources: [{ name: '坏源', url: 'https://bad.example/list.m3u' }],
     fetchText: async () => { throw new Error(' unavailable '); },
+    disableLocal: true,
   });
   await assert.rejects(() => collector.getSnapshot(), /所有直播清单源暂不可用/);
 });
@@ -95,12 +96,29 @@ test('远端全挂时 assets/ 本地 m3u 自动兜底', async (t) => {
   assert.equal(typeof live.LiveCollector, 'function');
   const fs = await import('node:fs');
   const path = await import('node:path');
+  // 先清掉 assets/ 目录里的真文件，确保测试完全受控
   const localDir = path.join(import.meta.dirname, 'assets');
-  const localFile = path.join(localDir, 'iptv4.m3u');
+  const existed = fs.existsSync(localDir);
+  const savedFiles = [];
+  if (existed) {
+    for (const f of fs.readdirSync(localDir)) {
+      const full = path.join(localDir, f);
+      savedFiles.push({ name: f, data: fs.readFileSync(full) });
+    }
+    fs.rmSync(localDir, { recursive: true });
+  }
   fs.mkdirSync(localDir, { recursive: true });
-  fs.writeFileSync(localFile,
+  fs.writeFileSync(path.join(localDir, 'iptv4.m3u'),
     '#EXTM3U\n#EXTINF:-1 group-title="央视",CCTV1\nhttps://local.example/cctv1.m3u8\n');
-  t.after(() => { try { fs.rmSync(localDir, { recursive: true, force: true }); } catch {} });
+  t.after(() => {
+    try { fs.rmSync(localDir, { recursive: true, force: true }); } catch {}
+    for (const s of savedFiles) {
+      try {
+        fs.mkdirSync(localDir, { recursive: true });
+        fs.writeFileSync(path.join(localDir, s.name), s.data);
+      } catch {}
+    }
+  });
 
   const collector = new live.LiveCollector({
     sources: [{ name: '坏源', url: 'https://bad.example/list.m3u' }],
