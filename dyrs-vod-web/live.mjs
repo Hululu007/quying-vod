@@ -360,22 +360,26 @@ export class LiveCollector {
         const rows = parseM3U(text, source.name);
         if (!rows.length) throw new Error('清单无有效频道');
         // === 分片可达性探针 ===
-        // 识别"假活清单"：清单能拉到（302 不算错）但分片拉不到（运营商鉴权过期/封 IP）。
-        // 抽前 10 条 HTTP 分片 URL，每条 fetchText() 跟随 302 拿最终 body，
-        // 以 #EXTM3U 开头才算真活。≥3/10（30%）通过 → 保留源；否则淘汰。
-        // 只有清单足够大（≥5 条）才做探针——小清单可能是手工硬编码，跳过探针避免误伤。
+        // 只对"运营商内网清单"做探针——它们会 302 重定向到鉴权接口，过期后全返回 error code 1034。
+        // 特征：host 含 cmvideo（移动 IPTV）、PLTV（电信 IPTV）、或 fanmingming/m3u.ibert.me 聚合的运营商源。
+        // iptv-org 系列源是全球公网 CDN，即使部分区域性频道挂了也不会全死，跳过探针省时间。
+        const NEED_PROBE = /cmvideo|PLTV|wasulive/i.test(source.url) || /fmml|ycl_iptv/.test(source.name);
         let probePass = true;
-        if (rows.length >= 5) {
-          const probeRows = rows.filter((r) => /^https?:/i.test(r.url)).slice(0, 10);
+        if (NEED_PROBE && rows.length >= 5) {
+          const probeRows = rows.filter((r) => /^https?:/i.test(r.url)).slice(0, 5);
           if (probeRows.length >= 1) {
-            let probeOk = 0;
-            for (const probe of probeRows) {
+            // 并行 5 条，5s 超时，快速出结果
+            const probeResults = await Promise.all(probeRows.map(async (probe) => {
               try {
-                const fragment = await this.fetchText(probe.url);
-                if (fragment.replace(/^\uFEFF/, '').trimStart().startsWith('#EXTM3U')) probeOk++;
-              } catch { /* 探针失败忽略 */ }
-            }
-            probePass = probeOk >= Math.max(3, Math.ceil(probeRows.length * 0.3)); // ≥30% 且至少 3 条
+                const fragment = await Promise.race([
+                  this.fetchText(probe.url),
+                  new Promise((_, rej) => setTimeout(() => rej(new Error('probe-timeout')), 5000)),
+                ]);
+                return fragment.replace(/^\uFEFF/, '').trimStart().startsWith('#EXTM3U');
+              } catch { return false; }
+            }));
+            const probeOk = probeResults.filter(Boolean).length;
+            probePass = probeOk >= Math.max(2, Math.ceil(probeRows.length * 0.4)); // ≥40% 且至少 2 条
           }
         }
         if (!probePass) {
