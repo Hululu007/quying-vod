@@ -91,6 +91,31 @@ test('全部源失败且无旧快照时抛出错误', async () => {
   await assert.rejects(() => collector.getSnapshot(), /所有直播清单源暂不可用/);
 });
 
+test('远端全挂时 assets/ 本地 m3u 自动兜底', async (t) => {
+  assert.equal(typeof live.LiveCollector, 'function');
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const localDir = path.join(import.meta.dirname, 'assets');
+  const localFile = path.join(localDir, 'iptv4.m3u');
+  fs.mkdirSync(localDir, { recursive: true });
+  fs.writeFileSync(localFile,
+    '#EXTM3U\n#EXTINF:-1 group-title="央视",CCTV1\nhttps://local.example/cctv1.m3u8\n');
+  t.after(() => { try { fs.rmSync(localDir, { recursive: true, force: true }); } catch {} });
+
+  const collector = new live.LiveCollector({
+    sources: [{ name: '坏源', url: 'https://bad.example/list.m3u' }],
+    fetchText: async () => { throw new Error(' down '); },
+    ttl: 0,
+  });
+  const snapshot = await collector.getSnapshot({ force: true });
+  assert.equal(snapshot.stale, true);
+  assert.equal(snapshot.channels.length, 1);
+  assert.equal(snapshot.channels[0].name, 'CCTV1');
+  const localSource = snapshot.sources.find((s) => s.local);
+  assert.ok(localSource);
+  assert.match(localSource.name, /本地/);
+});
+
 test('缓存内不重复采集，强制刷新会重新拉取', async () => {
   assert.equal(typeof live.LiveCollector, 'function');
   let calls = 0;

@@ -1,4 +1,9 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export const LIVE_GROUP_NAMES = ['央视', '卫视', '地方', '体育', '影视', '少儿', '港澳台', '国际', '其他'];
 export const LIVE_EPG_URL = 'http://epg.51zmt.top:8000/e.xml';
@@ -8,6 +13,34 @@ export const DEFAULT_LIVE_SOURCES = [
   { name: 'iptv-org', url: 'https://iptv-org.github.io/iptv/index.m3u' },
   { name: 'myIPTV', url: 'https://gh-proxy.org/raw.githubusercontent.com/suxuang/myIPTV/main/ipv4.m3u' },
 ];
+
+// 可选本地 assets/ 兜底：用户可在 dyrs-vod-web/assets/ 或 public/assets/ 放置 .m3u 文件，
+// 当远端源全部不可用时仍有基础频道。优先级低于远端，远端同名频道不会被本地覆盖。
+function readLocalLiveSources() {
+  const candidates = [
+    path.join(__dirname, 'assets'),
+    path.join(__dirname, '..', 'assets'),
+    path.join(__dirname, 'public', 'assets'),
+  ];
+  const sources = [];
+  const seen = new Set();
+  for (const dir of candidates) {
+    if (!fs.existsSync(dir)) continue;
+    let entries = [];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+    for (const file of entries) {
+      if (!file.isFile() || !/\.m3u$/i.test(file.name)) continue;
+      const fullPath = path.join(dir, file.name);
+      if (seen.has(fullPath)) continue;
+      seen.add(fullPath);
+      let text;
+      try { text = fs.readFileSync(fullPath, 'utf8'); } catch { continue; }
+      if (!text || !text.replace(/^\uFEFF/, '').trimStart().startsWith('#EXTM3U')) continue;
+      sources.push({ name: `本地-${path.basename(file.name, path.extname(file.name))}`, text });
+    }
+  }
+  return sources;
+}
 
 function cleanName(value) {
   return String(value || '')
@@ -187,15 +220,28 @@ export class LiveCollector {
         sources.push({ name: source.name, url: source.url, ok: false, count: 0, error: String((error && error.message) || error).trim() });
       }
     }));
+    let allRemoteDown = false;
+    if (!entries.length) {
+      // 所有远端源均失败 — 尝试本地 assets/ 兜底
+      allRemoteDown = true;
+      const local = readLocalLiveSources();
+      for (const src of local) {
+        const rows = parseM3U(src.text, src.name);
+        if (rows.length) {
+          entries.push(...rows);
+          sources.push({ name: src.name, url: '(本地)', ok: true, count: rows.length, local: true });
+        }
+      }
+    }
     if (!entries.length) throw new Error('所有直播清单源暂不可用');
     const channels = mergeLiveChannels(entries);
     const groups = LIVE_GROUP_NAMES.map((name) => ({ id: name, name, count: channels.filter((channel) => channel.group === name).length })).filter((group) => group.count > 0);
     return {
       updatedAt: new Date().toISOString(),
-      stale: false,
+      stale: allRemoteDown,
       channels,
       groups,
-      sources: this.sources.map((source) => sources.find((item) => item.url === source.url)),
+      sources: this.sources.map((source) => sources.find((item) => item.url === source.url)).concat(sources.filter((item) => item.local)),
     };
   }
 

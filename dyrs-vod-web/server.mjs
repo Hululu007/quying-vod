@@ -142,7 +142,13 @@ const CLASSES = CATEGORIES.map((c) => ({ type_id: c.id, type_pid: 0, type_name: 
 
 // Poster CDN hosts observed on the resource API. Unlisted hosts are left
 // untouched so the browser can load them directly.
-const IMAGE_HOST_RES = [/(^|\.)bfp\d+\.com$/i, /(^|\.)sinaimg\.cn$/i, /(^|\.)tupian\.click$/i];
+const IMAGE_HOST_RES = [
+  /(^|\.)bfp\d+\.com$/i,
+  /(^|\.)sinaimg\.cn$/i,
+  /(^|\.)tupian\.click$/i,
+  /(^|\.)zbds\.top$/i,
+  /(^|\.)gitee\.com$/i,
+];
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
