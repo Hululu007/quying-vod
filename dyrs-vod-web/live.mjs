@@ -12,7 +12,6 @@ export const LIVE_EPG_URL = 'http://epg.51zmt.top:8000/e.xml';
 export const DEFAULT_LIVE_SOURCES = [
   // === 国内台主力（高质量，实测可达率 >= 70%） ===
   { name: 'fmml_itv', url: 'https://m3u.ibert.me/fmml_itv.m3u', note: 'fanmingming/IPTV，中国移动官方 CDN，可达率 100%' },
-  { name: 'fmml_ipv6', url: 'https://m3u.ibert.me/fmml_ipv6.m3u', note: 'fanmingming/IPTV IPv6 线路，公网 IPv6 环境可达' },
   { name: 'o_s_cn', url: 'https://m3u.ibert.me/o_s_cn.m3u', note: 'iptv.org 中国精选流，可达率 ~73%' },
   { name: 'cn', url: 'https://m3u.ibert.me/cn.m3u', note: 'epg.pw 自动整理中国源' },
   // === 原有兜底 ===
@@ -27,6 +26,7 @@ export const DISABLED_LIVE_SOURCES = [
   { name: 'vbskycn', url: 'https://gh-proxy.com/raw.githubusercontent.com/vbskycn/iptv/refs/heads/master/tv/iptv4.m3u', reason: 'gh-proxy.com 镜像持续 403，清单完全不可达' },
   { name: 'fmml_index', url: 'https://m3u.ibert.me/fmml_index.m3u', reason: '0/40 可达率，host 58.248.112.205 全死' },
   { name: 'ycl_iptv', url: 'https://m3u.ibert.me/ycl_iptv.m3u', reason: '全是 RTSP/UDP 组播，公网不可用' },
+  { name: 'fmml_ipv6', url: 'https://m3u.ibert.me/fmml_ipv6.m3u', reason: '清单内全是 IPv6 分片地址，Vercel/Cloudflare IPv4-only 生产环境不可达（ENETUNREACH）' },
 ];
 
 // 可选本地 assets/ 兜底：用户可在 dyrs-vod-web/assets/ 或 public/assets/ 放置 .m3u 文件，
