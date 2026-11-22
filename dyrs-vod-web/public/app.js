@@ -1041,18 +1041,18 @@
     }
   }
 
-  // 并行探测前 3 条候选线路（首选线路排最前），返回第一条可用的；
-  // 全部探测失败时仍返回首选线路，交给播放器 watchdog / fatal 事件兜底切线。
+  // 并行探测全部线路（最多 5 条，首选线路排最前），返回第一条可用的；全死返回 -1。
+  // 全量探测是为了避免"全线路已死"的频道逐条等 watchdog 超时（最长要等一分多钟）。
   async function pickPlayableLine(channel, token) {
     const lines = channel.lines || [];
-    if (!lines.length) return 0;
+    if (!lines.length) return -1;
     const start = preferredLiveLine(channel);
-    const order = [start, ...lines.map((_, i) => i).filter((i) => i !== start)].slice(0, 3);
+    const order = [start, ...lines.map((_, i) => i).filter((i) => i !== start)].slice(0, 5);
     liveStatus('正在检测可用线路…');
-    const results = await Promise.all(order.map((i) => probeLiveUrl(lines[i].url)));
+    const results = await Promise.all(order.map((i) => probeLiveUrl(lines[i].url, 5000)));
     if (token !== liveState.token) return -1;
     const healthy = order.find((_, k) => results[k]);
-    return healthy === undefined ? start : healthy;
+    return healthy === undefined ? -1 : healthy;
   }
 
   async function startLivePlayback(channel) {
@@ -1060,7 +1060,16 @@
     stopLivePlayback();
     const token = liveState.token;
     const index = await pickPlayableLine(channel, token);
-    if (token !== liveState.token || index < 0) return;
+    if (token !== liveState.token) return;
+    if (index < 0) {
+      // 全线路实测不可用：直接提示，不再进入播放器空转等待
+      const empty = document.getElementById('livePlayerEmpty');
+      if (empty) empty.classList.remove('hidden');
+      liveState.lineIndex = -1;
+      updateLiveActive();
+      liveStatus('该频道全部线路暂不可用，请换一个频道或稍后重试。');
+      return;
+    }
     liveState.lineIndex = index;
     updateLiveActive();
     loadLiveLine(channel, index);
