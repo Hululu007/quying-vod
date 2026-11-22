@@ -1008,6 +1008,15 @@
     }
   }
 
+  // 在 HTTPS 页面上优先选 HTTPS 线路，避免浏览器混合内容拦截触发第一次播放失败；
+  // HTTP 页面则按清单顺序直接走第一条，减少无意义的切换等待。
+  function preferredLiveLine(channel) {
+    const lines = channel.lines || [];
+    if (location.protocol !== 'https:') return 0;
+    const firstHttps = lines.findIndex((line) => /^https:/i.test(line.url));
+    return firstHttps >= 0 ? firstHttps : 0;
+  }
+
   function selectLiveChannel(channel) {
     if (!channel) return;
     liveState.current = channel;
@@ -1019,13 +1028,14 @@
     if (lines) {
       clear(lines);
       channel.lines.forEach((line, index) => {
+        const secure = /^https:/i.test(line.url);
         lines.appendChild(el('button', {
-          class: 'live-line', 'data-line': index, title: line.url,
+          class: `live-line${secure ? ' secure' : ''}`, 'data-line': index, title: line.url,
           onclick: () => loadLiveLine(channel, index),
-        }, `线路 ${index + 1} · ${line.source || '直播源'}`));
+        }, `线路 ${index + 1}${secure ? ' 🔒' : ''} · ${line.source || '直播源'}`));
       });
     }
-    loadLiveLine(channel, 0);
+    loadLiveLine(channel, preferredLiveLine(channel));
     if (window.innerWidth < 900) {
       const panel = document.getElementById('livePlayerPanel');
       if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'start' });

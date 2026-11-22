@@ -20,3 +20,7 @@ test('直播页接入分组频道接口与 HLS 多线路播放器', () => {
   assert.match(styles, /\.live-layout/);
   assert.match(styles, /\.live-channel/);
 });
+
+test('频道首次播放时自动选择首条 HTTPS 线路，避免 HTTPS 页面触发 HTTP 混合内容失败', () => {
+  assert.match(app, /preferredLiveLine|pickPreferredLine|findIndex.*https|lines\.findIndex/);
+});
