@@ -1024,6 +1024,48 @@
     return firstHttps >= 0 ? firstHttps : 0;
   }
 
+  // 播放前探活：经同源代理拉清单头部，确认返回 #EXTM3U 才算可用。
+  // 代理端点 http/https 上游都支持，顺带规避 CORS 与 HTTPS 混合内容拦截。
+  async function probeLiveUrl(url, timeout = 4000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeout);
+    try {
+      const res = await fetch(`/live-proxy.m3u8?url=${encodeURIComponent(url)}`, { signal: controller.signal, cache: 'no-store' });
+      if (!res.ok) return false;
+      const head = (await res.text()).slice(0, 128).replace(/^\uFEFF/, '').trimStart();
+      return head.startsWith('#EXTM3U');
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // 并行探测前 3 条候选线路（首选线路排最前），返回第一条可用的；
+  // 全部探测失败时仍返回首选线路，交给播放器 watchdog / fatal 事件兜底切线。
+  async function pickPlayableLine(channel, token) {
+    const lines = channel.lines || [];
+    if (!lines.length) return 0;
+    const start = preferredLiveLine(channel);
+    const order = [start, ...lines.map((_, i) => i).filter((i) => i !== start)].slice(0, 3);
+    liveStatus('正在检测可用线路…');
+    const results = await Promise.all(order.map((i) => probeLiveUrl(lines[i].url)));
+    if (token !== liveState.token) return -1;
+    const healthy = order.find((_, k) => results[k]);
+    return healthy === undefined ? start : healthy;
+  }
+
+  async function startLivePlayback(channel) {
+    if (!channel) return;
+    stopLivePlayback();
+    const token = liveState.token;
+    const index = await pickPlayableLine(channel, token);
+    if (token !== liveState.token || index < 0) return;
+    liveState.lineIndex = index;
+    updateLiveActive();
+    loadLiveLine(channel, index);
+  }
+
   function selectLiveChannel(channel) {
     if (!channel) return;
     liveState.current = channel;
@@ -1042,7 +1084,7 @@
         }, `线路 ${index + 1}${secure ? ' 🔒' : ''} · ${line.source || '直播源'}`));
       });
     }
-    loadLiveLine(channel, preferredLiveLine(channel));
+    startLivePlayback(channel);
     if (window.innerWidth < 900) {
       const panel = document.getElementById('livePlayerPanel');
       if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
