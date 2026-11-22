@@ -350,6 +350,30 @@ export class LiveCollector {
         const text = await this.fetchText(source.url);
         const rows = parseM3U(text, source.name);
         if (!rows.length) throw new Error('清单无有效频道');
+        // === 分片可达性探针 ===
+        // 公共 IPTV 清单里大量运营商内网源（fmml_itv 这种）会 302 重定向到鉴权接口
+        // 过期后最终返回 error code: 1034 等错误。拉清单能拿到（302 不算错），
+        // 但真正的 m3u8 分片拉不到。探针：抽前 3 条 HTTP 线路各拉一次，
+        // 检查最终 body 以 #EXTM3U 开头（fetchText 跟随 302）。≥2/3 才算活。
+        // 只有清单足够大（≥5 条）才做探针——小清单可能是手工硬编码，跳过探针避免误伤。
+        let probePass = true;
+        if (rows.length >= 5) {
+          const probeRows = rows.filter((r) => /^https?:/i.test(r.url)).slice(0, 3);
+          if (probeRows.length >= 1) {
+            let probeOk = 0;
+            for (const probe of probeRows) {
+              try {
+                const fragment = await this.fetchText(probe.url);
+                if (fragment.replace(/^\uFEFF/, '').trimStart().startsWith('#EXTM3U')) probeOk++;
+              } catch { /* 探针失败忽略 */ }
+            }
+            probePass = probeOk >= 2; // ≥66% 通过才算活
+          }
+        }
+        if (!probePass) {
+          sources.push({ name: source.name, url: source.url, ok: false, count: rows.length, error: '分片探针未通过（运营商鉴权/封禁）', probeFailed: true });
+          continue;
+        }
         entries.push(...rows);
         sources.push({ name: source.name, url: source.url, ok: true, count: rows.length });
       } catch (error) {
