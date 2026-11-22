@@ -40,18 +40,23 @@ function randomCode(prefix = 'QY') {
 
 const DAY_MS = 86400000;
 function cardExpiry(row) {
-  return row && row.used_at ? row.used_at + Number(row.days) * DAY_MS : null;
+  // days === 0 表示永久，不计算到期时间；未核销也返回 null
+  if (!row || !row.used_at) return null;
+  const days = Number(row.days);
+  if (!days) return null;
+  return row.used_at + days * DAY_MS;
 }
-// 授权语义评估：unused 未核销、used 在有效期内 → 有效；disabled/过期 → 无效。
+// 授权语义评估：unused 未核销、used 在有效期内（含永久）→ 有效；disabled/过期 → 无效。
 function assessCard(row, nowMs) {
   if (!row) return { valid: false, reason: '卡密不存在' };
   if (row.status === 'disabled') return { valid: false, reason: '卡密已停用', expiresAt: cardExpiry(row) };
   const exp = cardExpiry(row);
+  // exp == null：未核销或永久卡，均不过期
   if (exp != null && exp <= nowMs) return { valid: false, reason: '卡密已过期', expiresAt: exp };
   return {
     valid: true,
     days: Number(row.days),
-    expiresAt: exp != null ? exp : nowMs + Number(row.days) * DAY_MS,
+    expiresAt: exp,
     fresh: row.used_at == null,
   };
 }
@@ -289,7 +294,8 @@ export class AdminStore {
   // ---- 卡密 ----
   generateCards({ count, days, prefix, note } = {}) {
     const total = Math.max(1, Math.min(500, Math.trunc(Number(count) || 1)));
-    const validDays = Math.max(1, Math.min(3650, Math.trunc(Number(days) || 30)));
+    const rawDays = Math.trunc(Number(days));
+    const validDays = Number.isFinite(rawDays) ? Math.max(0, Math.min(3650, rawDays)) : 30;
     const safePrefix = str(prefix, 8).replace(/[^A-Za-z0-9]/g, '').toUpperCase() || 'QY';
     const insert = this.db.prepare('INSERT INTO card_keys (code, days, status, note, created_at) VALUES (?, ?, ?, ?, ?)');
     const codes = [];
@@ -386,7 +392,7 @@ export class AdminStore {
       const nowMs = now();
       const info = this.db.prepare("UPDATE card_keys SET status='used', used_at=? WHERE code=? AND status='unused'").run(nowMs, key);
       if (info.changes > 0) {
-        return { valid: true, days: v.days, expiresAt: nowMs + v.days * DAY_MS, fresh: true };
+        return { valid: true, days: v.days, expiresAt: v.days ? nowMs + v.days * DAY_MS : null, fresh: true };
       }
       const row2 = this.db.prepare('SELECT * FROM card_keys WHERE code = ?').get(key);
       return assessCard(row2, now());

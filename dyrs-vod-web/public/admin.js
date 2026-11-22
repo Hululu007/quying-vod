@@ -348,7 +348,7 @@
       el('p', { class: 'desc' }, '卡密可用于会员开通、TVBox 授权或活动分发；生成后可复制或导出 CSV。'),
       el('div', { class: 'row' }, [
         el('div', { class: 'field' }, [el('label', {}, '数量（1-500）'), el('input', { id: 'cardCount', type: 'number', value: '10', min: '1', max: '500' })]),
-        el('div', { class: 'field' }, [el('label', {}, '有效天数'), el('input', { id: 'cardDays', type: 'number', value: '30', min: '1', max: '3650' })]),
+        el('div', { class: 'field' }, [el('label', {}, '有效天数（0 = 永久）'), el('input', { id: 'cardDays', type: 'number', value: '30' })]),
         el('div', { class: 'field' }, [el('label', {}, '前缀'), el('input', { id: 'cardPrefix', value: 'QY', maxlength: '8' })]),
       ]),
       el('div', { class: 'field' }, [el('label', {}, '备注（可选）'), el('input', { id: 'cardNote', placeholder: '例如：双十一活动' })]),
@@ -359,7 +359,10 @@
       event.preventDefault();
       const body = {
         count: Number(document.getElementById('cardCount').value) || 1,
-        days: Number(document.getElementById('cardDays').value) || 30,
+        // 0 表示永久有效，不能被 || 默认值吃掉
+        days: Number.isFinite(Number(document.getElementById('cardDays').value)) && document.getElementById('cardDays').value !== ''
+          ? Math.max(0, Math.trunc(Number(document.getElementById('cardDays').value)))
+          : 30,
         prefix: document.getElementById('cardPrefix').value.trim() || 'QY',
         note: document.getElementById('cardNote').value.trim(),
       };
@@ -397,7 +400,7 @@
       const { data } = await api(`/api/admin/cards?${params.toString()}`);
       const rows = data.list.map((card) => el('tr', {}, [
         el('td', {}, el('span', { class: 'code' }, card.code)),
-        el('td', {}, `${card.days} 天`),
+        el('td', {}, Number(card.days) ? `${card.days} 天` : '永久'),
         el('td', {}, el('span', {
           class: `badge ${card.status === 'unused' ? 'on' : card.status === 'used' ? 'used' : 'disabled'}`,
         }, card.status === 'unused' ? '未使用' : card.status === 'used' ? '已使用' : '已停用')),

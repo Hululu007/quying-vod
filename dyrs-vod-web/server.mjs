@@ -2137,7 +2137,7 @@ async function handleAdmin(req, res, p, url) {
       const rows = ['卡密,天数,状态,备注,创建时间,使用时间'];
       for (const card of await adminStore.exportCards()) {
         rows.push([
-          card.code, card.days, card.status, card.note,
+          card.code, Number(card.days) ? card.days : '永久', card.status, card.note,
           card.createdAt ? new Date(card.createdAt).toISOString() : '',
           card.usedAt ? new Date(card.usedAt).toISOString() : '',
         ].map(csvCell).join(','));
