@@ -1089,8 +1089,13 @@
         if (request !== liveState.request) return;
         const channel = todo[cursor];
         cursor += 1;
-        const first = channel.lines[0];
-        const alive = await probeLiveUrl(first.url, 5000);
+        // 前两条线路都探测失败才标失效：首线路死但备线路活时仍可播放，不应误伤
+        let alive = false;
+        for (const line of channel.lines.slice(0, 2)) {
+          if (request !== liveState.request) return;
+          alive = await probeLiveUrl(line.url, 5000);
+          if (alive) break;
+        }
         liveState.health.set(channel.id, alive);
         // 边探边标，用户能逐步看到失效标记，而不是等整页探完
         if (request === liveState.request) applyLiveHealthMarks();
