@@ -8,16 +8,25 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const LIVE_GROUP_NAMES = ['央视', '卫视', '地方', '体育', '影视', '少儿', '港澳台', '国际', '其他'];
 export const LIVE_EPG_URL = 'http://epg.51zmt.top:8000/e.xml';
 // 源顺序 = 线路优先级。前面的源先合并 → 频道的 lines[0] 来自可达率最高的源。
-// 可达率实测：fmml_itv 100% / o_s_cn 73% / epg.pw cn 未测但官方精选。
+// 分片探针自动淘汰假活源（运营商鉴权过期等），此处只列清单源，探针会兜底筛。
 export const DEFAULT_LIVE_SOURCES = [
-  // === 国内台主力（高质量，实测可达率 >= 70%） ===
-  { name: 'fmml_itv', url: 'https://m3u.ibert.me/fmml_itv.m3u', note: 'fanmingming/IPTV，中国移动官方 CDN，可达率 100%' },
-  { name: 'o_s_cn', url: 'https://m3u.ibert.me/o_s_cn.m3u', note: 'iptv.org 中国精选流，可达率 ~73%' },
-  { name: 'cn', url: 'https://m3u.ibert.me/cn.m3u', note: 'epg.pw 自动整理中国源' },
-  // === 原有兜底 ===
-  { name: 'iptv-org', url: 'https://iptv-org.github.io/iptv/index.m3u', note: '官方 GitHub Pages，国际台丰富但国内台大量死链' },
-  { name: 'ZBDS', url: 'https://live.zbds.top/tv/iptv4.m3u', note: '备用' },
-  { name: 'myIPTV', url: 'https://raw.githubusercontent.com/suxuang/myIPTV/main/ipv4.m3u', note: '原始 github 直链，不再走 gh-proxy.org' },
+  // === 国内台主力 ===
+  { name: 'fmml_itv',   url: 'https://m3u.ibert.me/fmml_itv.m3u' },
+  { name: 'o_s_cn',     url: 'https://m3u.ibert.me/o_s_cn.m3u' },
+  { name: 'cn',         url: 'https://m3u.ibert.me/cn.m3u' },
+  // === iptv-org 分类精选（公网 CDN，可达率 40-80%，少儿/体育/电影/综艺/音乐/教育/纪录片） ===
+  { name: 'iptv-org-kids',       url: 'https://iptv-org.github.io/iptv/categories/kids.m3u' },
+  { name: 'iptv-org-sports',     url: 'https://iptv-org.github.io/iptv/categories/sports.m3u' },
+  { name: 'iptv-org-entertain',  url: 'https://iptv-org.github.io/iptv/categories/entertainment.m3u' },
+  { name: 'iptv-org-music',      url: 'https://iptv-org.github.io/iptv/categories/music.m3u' },
+  { name: 'iptv-org-movies',     url: 'https://iptv-org.github.io/iptv/categories/movies.m3u' },
+  { name: 'iptv-org-education',  url: 'https://iptv-org.github.io/iptv/categories/education.m3u' },
+  { name: 'iptv-org-documentary', url: 'https://iptv-org.github.io/iptv/categories/documentary.m3u' },
+  { name: 'iptv-org-cn',         url: 'https://iptv-org.github.io/iptv/countries/cn.m3u' },
+  // === 全量兜底 ===
+  { name: 'iptv-org-all', url: 'https://iptv-org.github.io/iptv/index.m3u' },
+  { name: 'ZBDS',         url: 'https://live.zbds.top/tv/iptv4.m3u' },
+  { name: 'myIPTV',       url: 'https://raw.githubusercontent.com/suxuang/myIPTV/main/ipv4.m3u' },
 ];
 
 // 已知完全不可用的源：vbskycn（gh-proxy.com 长期 403）、以及其它历史上连续挂掉的源。
