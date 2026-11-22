@@ -123,9 +123,10 @@ const PROVINCE_NAMES = ['北京', '天津', '上海', '重庆',
 
 // 央视真正的标识：频道名必须显式命中。rawGroup 兜底条件更严格。
 // 关键词前后加边界约束，避免 "DanceTV" 小写 "dancetv" 里包含 "cetv" 这种误命中。
-const CCTV_NAME_RE = /(^|[\s\-_])(cctv)([\s\-_]|[-+]?\d|$)|(^|[\s\-_])cetv-\d|cgtn|央视|央視|中国中央電?视|china\s*central/i;
+const CCTV_NAME_RE = /(^|[\s\-_])(cctv)\s*[-]?\s*\d|(^|[\s\-_])cetv\s*[-]?\s*\d|cgtn|央视|央視|中国中央電?视|china\s*central/i;
 // 全英文频道里的"伪央视"排除：Red CCTV（英国纪录片）、WCETV（美国教育）、DanceTV（EDM）等
-const CCTV_ENGLISH_BLACKLIST_RE = /(red\s+cctv|wcetv|dancetv|^cetv\b[^-]|^cctv\b[^0-9\-+])/i;
+// 关键：cctv 后面可以有空格但必须跟数字（如 "CCTV 1"），只有字母才算伪央视（如 "CCTV English"）
+const CCTV_ENGLISH_BLACKLIST_RE = /(red\s+cctv|wcetv|dancetv|^cetv\b(?!\s*\d)|^cctv\b(?!\s*[\d\-+]))/i;
 
 // 卫视名识别：频道名含 "卫视"/"衛視" 或英文 Satellite TV/Channel
 const WEISHI_NAME_RE = /(卫视|衛視|satellite\s*(?:tv|channel)?)/i;
