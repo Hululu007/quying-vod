@@ -347,7 +347,9 @@ export class LiveCollector {
   async collect() {
     const sources = [];
     const entries = [];
-    await Promise.all(this.sources.map(async (source) => {
+    // 串行采集：源在 DEFAULT_LIVE_SOURCES 里的顺序 = 线路优先级
+    // 先采到的源 → 频道的 lines[0]，后采到的追加到 lines[1+]
+    for (const source of this.sources) {
       try {
         const text = await this.fetchText(source.url);
         const rows = parseM3U(text, source.name);
@@ -357,7 +359,7 @@ export class LiveCollector {
       } catch (error) {
         sources.push({ name: source.name, url: source.url, ok: false, count: 0, error: String((error && error.message) || error).trim() });
       }
-    }));
+    }
     let allRemoteDown = false;
     if (!entries.length && !this.disableLocal) {
       allRemoteDown = true;
