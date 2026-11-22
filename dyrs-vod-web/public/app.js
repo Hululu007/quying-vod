@@ -879,6 +879,7 @@
     group: '', wd: '', pg: 1, size: 60, pagecount: 1, total: 0, totalAll: 0,
     groups: [], channels: [], current: null, lineIndex: 0,
     hls: null, retryTimer: null, watchdog: null, token: 0, request: 0,
+    health: new Map(), // channel.id → 首线路是否可用（会话内缓存，避免翻页重复探测）
   };
   let hlsLoader = null;
 
@@ -1075,6 +1076,48 @@
     loadLiveLine(channel, index);
   }
 
+  // 频道列表健康度：分批探测每条频道首线路，失效的在列表项上标「疑似失效」。
+  // 结果按 channel.id 缓存在 liveState.health，翻页/切分组不重复探测。
+  async function markLiveHealth(channels, request) {
+    const todo = (channels || []).filter(
+      (c) => c.lines && c.lines.length && !liveState.health.has(c.id),
+    );
+    if (!todo.length) { applyLiveHealthMarks(); return; }
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < todo.length) {
+        if (request !== liveState.request) return;
+        const channel = todo[cursor];
+        cursor += 1;
+        const first = channel.lines[0];
+        const alive = await probeLiveUrl(first.url, 5000);
+        liveState.health.set(channel.id, alive);
+        // 边探边标，用户能逐步看到失效标记，而不是等整页探完
+        if (request === liveState.request) applyLiveHealthMarks();
+      }
+    };
+    await Promise.all([worker(), worker(), worker(), worker()]);
+    if (request === liveState.request) applyLiveHealthMarks();
+  }
+
+  // 把健康度结果落到列表 DOM：失效加 .dead 和「疑似失效」角标，恢复的移除角标。
+  function applyLiveHealthMarks() {
+    document.querySelectorAll('.live-channel[data-id]').forEach((node) => {
+      const alive = liveState.health.get(node.dataset.id);
+      const dead = alive === false;
+      node.classList.toggle('dead', dead);
+      let badge = node.querySelector('.live-health');
+      if (dead) {
+        if (!badge) {
+          badge = el('span', { class: 'live-health', title: '首条线路探测未通过，可能已失效' }, '疑似失效');
+          node.appendChild(badge);
+        }
+      } else if (badge) {
+        badge.remove();
+      }
+    });
+  }
+
   function selectLiveChannel(channel) {
     if (!channel) return;
     liveState.current = channel;
@@ -1165,6 +1208,8 @@
             ]),
           ]));
         });
+        // 列表渲染完再后台批量探活，不阻塞首屏
+        markLiveHealth(liveState.channels, request);
       }
       const pager = document.getElementById('livePager');
       if (pager) {

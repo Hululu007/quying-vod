@@ -558,6 +558,10 @@ table.docs code { color: #ffd28a; background: var(--bg); padding: 2px 6px; borde
 .live-channel-info { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .live-channel-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
 .live-channel-meta { color: var(--text-dim); font-size: 10px; }
+/* 频道列表健康度：首线路探测未通过的频道打「疑似失效」标记，仍可点击尝试 */
+.live-channel.dead { opacity: .62; }
+.live-channel.dead .live-channel-name { text-decoration: line-through; text-decoration-color: rgba(255,92,122,.55); }
+.live-health { flex: 0 0 auto; margin-left: auto; padding: 2px 6px; border-radius: 6px; background: rgba(255,92,122,.14); border: 1px solid rgba(255,92,122,.35); color: #ff8fa3; font-size: 9px; white-space: nowrap; }
 .live-pager { margin: 0; padding: 12px; border-top: 1px solid var(--border); }
 .live-pager:empty { display: none; }
 .live-pager .btn { min-width: 0; padding: 7px 10px; font-size: 11px; }
