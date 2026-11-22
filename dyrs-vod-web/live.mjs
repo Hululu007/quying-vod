@@ -158,6 +158,13 @@ const KIDS_RE = /(少儿|少兒|儿童|兒童|卡通|动画|動畫|幼儿|幼兒
 // 影视/电影
 const MOVIES_RE = /(影视|影視|电影|電影|影院|剧场|劇場|影院|劇院|movies?|films?|cinema|hbo|showtime|starz)/i;
 
+// 地方台命名特征：县/区级台名往往不含省名，靠后缀识别。
+// 放在央视/港澳台/卫视之后判定，避免误伤 CCTV-1综合、凤凰新闻等。
+const LOCAL_NAME_RE = /(新闻综合|综合频道|公共频道|都市频道|生活频道|民生频道|文旅频道|广播电视台$|电视台$)/;
+const LOCAL_SHORT_RE = /^[\u4e00-\u9fa5]{2,4}(综合|新闻)$/;
+// 上游 rawGroup 明确标为地方/城市/省内 → 地方台
+const LOCAL_RAW_GROUP_RE = /(地方|城市|省内|本地|县市)/i;
+
 export function classifyLiveGroup(name, rawGroup = '') {
   const cleanName = String(name || '').normalize('NFKC').trim();
   const cleanGroup = String(rawGroup || '').normalize('NFKC').trim();
@@ -194,6 +201,9 @@ export function classifyLiveGroup(name, rawGroup = '') {
   // 5) 卫视：频道名含 "卫视"/"衛視"/Satellite
   if (WEISHI_NAME_RE.test(cleanName)) return '卫视';
 
+  // 5.5) 地方台命名特征（县/区级台没有省名可匹配）：新闻综合、综合频道、XX综合、XX新闻 等
+  if (LOCAL_NAME_RE.test(cleanName) || LOCAL_SHORT_RE.test(cleanName)) return '地方';
+
   // 6) 体育 / 少儿 / 影视：频道名关键词匹配
   if (SPORTS_RE.test(cleanName)) return '体育';
   if (KIDS_RE.test(cleanName)) return '少儿';
@@ -205,6 +215,7 @@ export function classifyLiveGroup(name, rawGroup = '') {
     //     避免 "法治天地"、"熊猫直播"、"金鹰纪实" 这类被上游乱标进央视的条目
     if (CCTV_NAME_RE.test(cleanGroup) && !PROVINCE_NAMES.some((p) => cleanName.includes(p)) && /中|中央/.test(cleanName)) return '央视';
     if (WEISHI_NAME_RE.test(cleanGroup)) return '卫视';
+    if (LOCAL_RAW_GROUP_RE.test(lowerGroup)) return '地方';
     if (HKMT_NAME_RE.test(cleanGroup) && !HKMT_BLACKLIST_RE.test(lowerGroup)) return '港澳台';
     if (SPORTS_RE.test(cleanGroup)) return '体育';
     if (KIDS_RE.test(cleanGroup)) return '少儿';
@@ -271,11 +282,17 @@ export function parseM3U(text, source = '') {
 
 export function mergeLiveChannels(entries) {
   const byName = new Map();
+  const rawGroupMap = new Map(); // key → 该频道出现过的所有上游 rawGroup，用于合并后二次归类
   for (const entry of entries || []) {
     const name = cleanName(entry && entry.name);
     const url = httpUrl(entry && entry.url, { media: true });
     const key = nameKey(name);
     if (!name || !url || !key) continue;
+    const entryRawGroup = String((entry && entry.rawGroup) || '').normalize('NFKC').trim();
+    if (entryRawGroup) {
+      if (!rawGroupMap.has(key)) rawGroupMap.set(key, new Set());
+      rawGroupMap.get(key).add(entryRawGroup);
+    }
     let channel = byName.get(key);
     if (!channel) {
       channel = {
@@ -298,7 +315,15 @@ export function mergeLiveChannels(entries) {
   // 1) 前端 preferredLiveLine() 自动优先选 HTTPS
   // 2) HTTP 线路自动通过 /live-proxy.m3u8 代理，不会触发 mixed content
   // 所有源合并进 lines[]，客户端按顺序 fallback
-  for (const channel of byName.values()) {
+  for (const [key, channel] of byName) {
+    // 合并后二次归类：首个出现的源 rawGroup 可能为空（如 o_s_cn），导致落到"其他"。
+    // 用该频道所有上游 rawGroup 再试一次，能明确归类就纠正。
+    if (!channel.group || channel.group === '其他') {
+      for (const rg of rawGroupMap.get(key) || []) {
+        const g = classifyLiveGroup(channel.name, rg);
+        if (g && g !== '其他') { channel.group = g; break; }
+      }
+    }
     // 每个频道最多保留 5 条线路（避免合并过多垃圾备选）
     if (channel.lines.length > 5) channel.lines = channel.lines.slice(0, 5);
   }
