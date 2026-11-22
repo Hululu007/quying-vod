@@ -540,6 +540,7 @@ function pipeUpstream(target, res, opts = {}) {
 const liveCollector = new LiveCollector({
   sources: LIVE_SOURCES,
   ttl: LIVE_CACHE_TTL_MS,
+  disableLocal: process.env.LIVE_DISABLE_LOCAL === '1',
   fetchText: async (target) => {
     const origin = new URL(target).origin;
     if (hostCooling(origin)) throw new Error('直播源冷却中');

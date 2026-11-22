@@ -74,16 +74,98 @@ function httpUrl(value, { media = false } = {}) {
   }
 }
 
+// 上游清单里常见的垃圾/占位条目：支持作者、打赏、测试、广告流、donation 等。
+// 命中这些的频道直接过滤，不进入任何分组。
+const JUNK_NAME_RE = /^(支持作者|打赏|捐赠|赞赏|赞助|作者支持|test|测试|demo|dummy|sample|placeholder|ad$|广告|donate|donation|thanks?|请收藏|扫码|关注|公众号|VX|wx|wechat|qrcode|免费|福利|破解|vip|会员)$/i;
+const JUNK_RAW_GROUP_RE = /(支持作者|打赏|捐赠|赞赏|赞助|公众号|VX|wx|wechat|扫码|免费福利)/i;
+
+// 省级/直辖市名：频道名里出现这些 = 地方台，不管 rawGroup 标了什么。
+const PROVINCE_NAMES = ['北京', '天津', '上海', '重庆',
+  '河北', '河南', '山东', '山西', '陕西', '甘肃', '青海', '辽宁', '吉林', '黑龙江',
+  '江苏', '浙江', '安徽', '福建', '江西', '湖北', '湖南', '广东', '海南', '四川', '贵州', '云南',
+  '广西', '内蒙古', '西藏', '宁夏', '新疆',
+  '南京', '广州', '深圳', '成都', '杭州', '宁波', '苏州', '武汉', '长沙', '青岛', '大连', '厦门', '福州', '太原', '西安', '沈阳', '长春', '哈尔滨', '郑州', '合肥', '济南', '石家庄', '南宁', '昆明', '贵阳', '兰州', '银川', '西宁', '乌鲁木齐', '拉萨', '呼和浩特', '包头', '鄂尔多斯', '三亚', '珠海', '中山', '佛山', '东莞', '无锡', '常州', '徐州', '南通', '温州', '绍兴', '金华', '台州', '嘉兴', '湖州', '丽水', '衢州', '舟山', '漳州', '泉州', '莆田', '龙岩', '三明', '南平', '宁德', '萍乡', '新余', '鹰潭', '赣州', '吉安', '宜春', '抚州', '上饶'];
+
+// 央视真正的标识：频道名必须显式命中。rawGroup 兜底条件更严格。
+// 关键词前后加边界约束，避免 "DanceTV" 小写 "dancetv" 里包含 "cetv" 这种误命中。
+const CCTV_NAME_RE = /(^|[\s\-_])(cctv)([\s\-_]|[-+]?\d|$)|(^|[\s\-_])cetv-\d|cgtn|央视|央視|中国中央電?视|china\s*central/i;
+// 全英文频道里的"伪央视"排除：Red CCTV（英国纪录片）、WCETV（美国教育）、DanceTV（EDM）等
+const CCTV_ENGLISH_BLACKLIST_RE = /(red\s+cctv|wcetv|dancetv|^cetv\b[^-]|^cctv\b[^0-9\-+])/i;
+
+// 卫视名识别：频道名含 "卫视"/"衛視" 或英文 Satellite TV/Channel
+const WEISHI_NAME_RE = /(卫视|衛視|satellite\s*(?:tv|channel)?)/i;
+
+// 港澳台：频道名里显式命中台湾/澳门/香港专业台关键词。
+// 上游 rawGroup 标 "港澳台频道" 不再独立生效（会把爱奇艺、半岛新闻这类错收进来）。
+const HKMT_NAME_RE = /(香港|澳门|澳門|台湾|台灣|凤凰|鳳凰|tvb|hong\s*kong|macau|taiwan|now\s*(?:tv|news)|亚视|亞視|atel|八達通|澳亚|澳門|東森|东森|大爱|大愛|番薯|八大|八大|台视|台視|华视|華視|民视|民視|公视|公視|纬来|緯來|中天|非凡|壹電視|民間全民|TVBS|三立|东洋|年代|三立|卫视中文|衛視中文|东风|東風|华娱|華娛|星空|channel\s*v|mtv\s*taiwan)/i;
+// 港澳台黑名单：上游 rawGroup 标港澳台但频道名明显不是（爱奇艺是大陆的、半岛新闻是中东的）
+const HKMT_BLACKLIST_RE = /(爱奇艺|iqiyi|半岛|al\s*jazeera|aljazeera|卡达|qatar)/i;
+
+// 体育
+const SPORTS_RE = /(体育|體育|足球|篮球|籃球|网球|網球|斯诺克|排球|赛车|賽車|高尔夫|sports?|espn|nba|nfl|nhl|mlb|atp|wta|f1|uefa|cctv-5|cctv5)/i;
+
+// 少儿/动画
+const KIDS_RE = /(少儿|少兒|儿童|兒童|卡通|动画|動畫|幼儿|幼兒|baby|kids?|cartoon|nick|disney|boomerang|cctv-14|cctv14|cbeebies)/i;
+
+// 影视/电影
+const MOVIES_RE = /(影视|影視|电影|電影|影院|剧场|劇場|影院|劇院|movies?|films?|cinema|hbo|showtime|starz)/i;
+
 export function classifyLiveGroup(name, rawGroup = '') {
-  const text = `${rawGroup} ${name}`.normalize('NFKC').toLowerCase();
-  if (/港澳台|香港|澳门|台湾|台灣|凤凰|鳳凰|tvb|hong kong|macau|taiwan/.test(text)) return '港澳台';
-  if (/体育|體育|足球|篮球|籃球|网球|網球|sports?|espn|nba/.test(text)) return '体育';
-  if (/少儿|少兒|儿童|兒童|卡通|动画|動畫|kids?|cartoon|baby/.test(text)) return '少儿';
-  if (/影视|影視|电影|電影|影院|剧场|劇場|movies?|films?|cinema/.test(text)) return '影视';
-  if (/卫视|衛視|satellite/.test(text)) return '卫视';
-  if (/央视|央視|cctv|cgtn|cetv/.test(text)) return '央视';
-  if (/地方|北京|天津|上海|重庆|河北|河南|山东|山西|陕西|辽宁|吉林|黑龙江|江苏|浙江|安徽|福建|江西|湖北|湖南|广东|海南|四川|贵州|云南|甘肃|青海|广西|内蒙古|西藏|宁夏|新疆/.test(text)) return '地方';
-  if (/^[\x00-\x7f]+$/.test(`${rawGroup}${name}`) || /international|news|documentary|music|general|entertainment|lifestyle|religion|shop|travel|education|culture|business|weather/.test(text)) return '国际';
+  const cleanName = String(name || '').normalize('NFKC').trim();
+  const cleanGroup = String(rawGroup || '').normalize('NFKC').trim();
+  const lowerName = cleanName.toLowerCase();
+  const lowerGroup = cleanGroup.toLowerCase();
+
+  // 1) 垃圾过滤
+  if (JUNK_NAME_RE.test(lowerName) || JUNK_RAW_GROUP_RE.test(lowerGroup)) return '';
+
+  // 2) 频道名里有省级/直辖市名 → 地方台（优先级最高，覆盖上游 rawGroup 的"央视"误标）
+  //    精确匹配：先尝试城市名（2 字更具体），再尝试省/直辖市名
+  if (cleanName.length >= 2) {
+    // 频道名含 "卫视" → 卫视，除非是港澳台台（凤凰/星空/东风/华娱等）
+    if (/卫视|衛視/.test(cleanName)) {
+      if (CCTV_NAME_RE.test(cleanName)) return '央视';
+      if (HKMT_NAME_RE.test(cleanName) && !HKMT_BLACKLIST_RE.test(cleanName)) return '港澳台';
+      return '卫视';
+    }
+    for (const p of PROVINCE_NAMES) {
+      if (cleanName.includes(p)) {
+        // 省市命中，但频道名明确是央视的特殊处理
+        if (CCTV_NAME_RE.test(cleanName) && !CCTV_ENGLISH_BLACKLIST_RE.test(cleanName)) return '央视';
+        return '地方';
+      }
+    }
+  }
+
+  // 3) 央视：频道名必须显式命中 CCTV/CETV/CGTN/央视/央視，且不是全英文伪央视
+  if (CCTV_NAME_RE.test(cleanName) && !CCTV_ENGLISH_BLACKLIST_RE.test(cleanName)) return '央视';
+
+  // 4) 港澳台：频道名命中台湾/澳门/香港台关键词，排除黑名单
+  if (HKMT_NAME_RE.test(cleanName) && !HKMT_BLACKLIST_RE.test(cleanName)) return '港澳台';
+
+  // 5) 卫视：频道名含 "卫视"/"衛視"/Satellite
+  if (WEISHI_NAME_RE.test(cleanName)) return '卫视';
+
+  // 6) 体育 / 少儿 / 影视：频道名关键词匹配
+  if (SPORTS_RE.test(cleanName)) return '体育';
+  if (KIDS_RE.test(cleanName)) return '少儿';
+  if (MOVIES_RE.test(cleanName)) return '影视';
+
+  // 7) 上游 rawGroup 兜底：仅限频道名不明确时，且兜底条件更严格
+  if (lowerGroup) {
+    // 7a) 央视兜底：rawGroup 含"央视"，**且频道名里必须含"中"字**（中国/中华/中央）
+    //     避免 "法治天地"、"熊猫直播"、"金鹰纪实" 这类被上游乱标进央视的条目
+    if (CCTV_NAME_RE.test(cleanGroup) && !PROVINCE_NAMES.some((p) => cleanName.includes(p)) && /中|中央/.test(cleanName)) return '央视';
+    if (WEISHI_NAME_RE.test(cleanGroup)) return '卫视';
+    if (HKMT_NAME_RE.test(cleanGroup) && !HKMT_BLACKLIST_RE.test(lowerGroup)) return '港澳台';
+    if (SPORTS_RE.test(cleanGroup)) return '体育';
+    if (KIDS_RE.test(cleanGroup)) return '少儿';
+    if (MOVIES_RE.test(cleanGroup)) return '影视';
+  }
+
+  // 8) 全英文 → 国际
+  if (/^[\x00-\x7f]+$/.test(cleanName) || /international|documentary|music|general|entertainment|lifestyle|religion|travel|education|culture|business|weather/i.test(cleanName)) return '国际';
+
   return '其他';
 }
 
@@ -124,12 +206,14 @@ export function parseM3U(text, source = '') {
     }
     if (!name || !url) continue;
     const rawGroup = String(attrs['group-title'] || '').normalize('NFKC').trim();
+    const group = classifyLiveGroup(name, rawGroup);
+    if (!group) continue;  // 垃圾/不可分类条目过滤
     rows.push({
       name,
       tvgId: String(attrs['tvg-id'] || '').trim(),
       logo: httpUrl(attrs['tvg-logo']),
       rawGroup,
-      group: classifyLiveGroup(name, rawGroup),
+      group,
       url,
       source: String(source || '').trim(),
     });

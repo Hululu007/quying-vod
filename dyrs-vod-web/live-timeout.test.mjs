@@ -28,6 +28,7 @@ test('持续慢速传输的清单也受采集总超时约束', async (t) => {
   process.env.VERCEL = '1';
   process.env.LIVE_SOURCES = `http://127.0.0.1:${upstreamPort}/slow.m3u`;
   process.env.LIVE_FETCH_TIMEOUT_MS = '1000';
+  process.env.LIVE_DISABLE_LOCAL = '1';  // 隔离本地 assets/ 兜底，让超时场景返回 502
   const { requestHandler } = await import('./server.mjs');
   const app = http.createServer(requestHandler);
   const appPort = await listen(app);
