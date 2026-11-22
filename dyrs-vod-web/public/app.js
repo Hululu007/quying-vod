@@ -1105,7 +1105,7 @@
   }
 
   async function loadLiveGroups() {
-    const data = await api('/api/live/groups');
+    const data = await api(`/api/live/groups?t=${Date.now()}`);
     liveState.groups = Array.isArray(data.groups) ? data.groups : [];
     liveState.totalAll = Number(data.total) || 0;
     renderLiveGroupTabs();
@@ -1124,7 +1124,7 @@
     clear(host);
     host.appendChild(spinner('频道加载中…'));
     try {
-      const params = new URLSearchParams({ pg: String(liveState.pg), size: String(liveState.size) });
+      const params = new URLSearchParams({ pg: String(liveState.pg), size: String(liveState.size), t: String(Date.now()) });
       if (liveState.group) params.set('group', liveState.group);
       if (liveState.wd) params.set('wd', liveState.wd);
       const data = await api(`/api/live/channels?${params}`);

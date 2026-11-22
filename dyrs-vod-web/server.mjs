@@ -2548,14 +2548,15 @@ export async function requestHandler(req, res) {
       return;
     }
     if (p === '/api/live/groups') {
-      sendJsonCacheable(res, 200, {
+      // 直播快照会随采集刷新变化，必须实时：禁用边缘/浏览器缓存，避免前端拿到上一版分组数字。
+      sendJson(res, 200, {
         ok: true,
         total: snapshot.channels.length,
         updatedAt: snapshot.updatedAt,
         stale: snapshot.stale,
         groups: snapshot.groups,
         sources: snapshot.sources,
-      }, { sMaxAge: 300, maxAge: 30 });
+      });
       return;
     }
     if (p === '/api/live/channels') {
@@ -2567,7 +2568,7 @@ export async function requestHandler(req, res) {
         page: url.searchParams.get('pg'),
         size: url.searchParams.get('size'),
       });
-      sendJsonCacheable(res, 200, { ok: true, ...result, updatedAt: snapshot.updatedAt, stale: snapshot.stale }, { sMaxAge: 300, maxAge: 30 });
+      sendJson(res, 200, { ok: true, ...result, updatedAt: snapshot.updatedAt, stale: snapshot.stale });
       return;
     }
     const body = buildLiveM3U(snapshot.channels);
