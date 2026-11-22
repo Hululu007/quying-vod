@@ -266,7 +266,7 @@
   const PRIMARY = CATEGORIES[0].items;
   let site = {
     name: '趣影', subtitle: '高清影视 · 即搜即看', notice: '', footer: '',
-    adsEnabled: true, carouselInterval: 5000,
+    adsEnabled: true, carouselInterval: 5000, requireCard: false,
   };
 
   function primaryOf(t) {
@@ -885,7 +885,7 @@
     app.appendChild(panel);
     panel.appendChild(el('h3', {}, '配置地址'));
     const card = cardCode();
-    if (!card) {
+    if (site.requireCard && !card) {
       panel.appendChild(el('div', { class: 'banner warn', style: 'margin-bottom:10px' }, '未检测到授权卡密：请先点击右上角「授权」输入卡密，否则配置地址无法加载片库。'));
     }
     const row = el('div', { class: 'copy-row' });
@@ -984,6 +984,8 @@
 
   // ---- boot ----
   function injectCardButton() {
+    // 仅授权模式（REQUIRE_CARD=1）才展示「授权」入口
+    if (!site.requireCard) return;
     const nav = document.querySelector('nav.nav');
     if (!nav) return;
     const a = document.createElement('a');
@@ -1026,11 +1028,11 @@
       const urlCode = bootParams.get('code');
       if (urlCode) localStorage.setItem(CARD_KEY, urlCode.trim());
     } catch {}
-    injectCardButton();
     try {
       const conf = await api('/api/site');
       site = { ...site, ...conf };
     } catch { /* 使用默认站点配置 */ }
+    injectCardButton();
     document.title = `${site.name} · 在线点播`;
     const nameEl = document.querySelector('.brand-text h1');
     const subEl = document.querySelector('.brand-text .subtitle');

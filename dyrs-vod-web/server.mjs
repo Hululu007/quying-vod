@@ -1876,6 +1876,7 @@ async function sitePayload() {
     footer: settings.footer_text || '',
     adsEnabled: (settings.ads_enabled == null ? '1' : String(settings.ads_enabled)) !== '0',
     carouselInterval: Math.max(2000, Math.min(15000, Number(settings.carousel_interval) || 5000)),
+    requireCard: REQUIRE_CARD,
   };
 }
 
