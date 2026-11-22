@@ -995,9 +995,26 @@
       e.preventDefault();
       const c = await showCardDialog(cardCode() ? '更新授权卡密（留空并确定可清除）：' : '请输入授权卡密以访问片库：');
       if (c != null) {
-        if (c) { try { localStorage.setItem(CARD_KEY, c); } catch {} }
-        else { try { localStorage.removeItem(CARD_KEY); } catch {} }
-        a.textContent = cardCode() ? '授权 ✓' : '授权';
+        if (c) {
+          // 先校验卡密再写入本地，避免错误卡密导致刷新后仍然 401
+          try {
+            const res = await fetch(`/api/card/verify?code=${encodeURIComponent(c)}`);
+            const v = await res.json();
+            if (!v || !v.valid) {
+              alert(`卡密无效：${(v && v.reason) || '请检查后重试'}`);
+              return;
+            }
+          } catch {
+            alert('卡密校验失败，请检查网络后重试');
+            return;
+          }
+          try { localStorage.setItem(CARD_KEY, c); } catch {}
+          a.textContent = '授权 ✓';
+          alert('激活成功，请刷新浏览器！');
+        } else {
+          try { localStorage.removeItem(CARD_KEY); } catch {}
+          a.textContent = '授权';
+        }
       }
     });
     nav.appendChild(a);
