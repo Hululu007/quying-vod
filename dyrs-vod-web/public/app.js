@@ -1102,9 +1102,11 @@
 
   // 把健康度结果落到列表 DOM：失效加 .dead 和「疑似失效」角标，恢复的移除角标。
   function applyLiveHealthMarks() {
+    let deadCount = 0;
     document.querySelectorAll('.live-channel[data-id]').forEach((node) => {
       const alive = liveState.health.get(node.dataset.id);
       const dead = alive === false;
+      if (dead) deadCount += 1;
       node.classList.toggle('dead', dead);
       let badge = node.querySelector('.live-health');
       if (dead) {
@@ -1116,6 +1118,11 @@
         badge.remove();
       }
     });
+    // 列表头部同步显示失效数量，方便一眼判断本页质量
+    const count = document.getElementById('liveCount');
+    if (count && liveState.total) {
+      count.textContent = `${liveState.total} 个频道` + (deadCount ? ` · 本页 ${deadCount} 个疑似失效` : '');
+    }
   }
 
   function selectLiveChannel(channel) {
