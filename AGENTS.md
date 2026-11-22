@@ -24,14 +24,14 @@
 - `/play.m3u8`、`/resolve`：同源播放链接（`?id=<id>&p=<sequence>`）与播放地址解析
 - `/api/vod/tvbox`：TVBox 配置，线上正确端点（不是 `/tvbox.json`）
 - `/api/site`、`/api/ads?slot=carousel|nav`：前台站点配置与广告位
-- `/api/card/verify?code=`：卡密有效性校验（不自动核销）
+- `/api/card/verify?code=`：卡密有效性查询（不核销）；`REQUIRE_CARD=1` 时受保护接口由中间件调用 `authorizeCard` 核销并校验有效期，卡密读取顺序 `?code=` → `X-Auth-Code` 头 → `qy_card` cookie
 - `/api/health`：健康检查
 
 ## 后台
 - `/admin` 静态后台；接口前缀 `/api/admin/*`，Cookie 会话（`qy_admin`，HttpOnly，7 天）
 - 数据库为空时用 `ADMIN_PASSWORD`（缺省 `admin123`）初始化密码；登录后应立即在「站点与授权」修改
 - 广告位：`carousel` 最多 5 条（首页轮播），`nav` 为顶部导航广告条；仅启用且站点广告开关打开时前台展示
-- 卡密：批量生成、状态筛选、停用/恢复、删除、导出 CSV；状态 `unused|used|disabled`
+- 卡密：批量生成、状态筛选、停用/恢复、删除、导出 CSV；状态 `unused|used|disabled`。`REQUIRE_CARD=1` 开启强制授权：首次访问受保护接口自动核销（`unused→used`，写 `used_at`），有效期 = `used_at + days` 天；过期或停用即返回 401。`verifyCard` 只查不核销，`authorizeCard` 负责核销与并发安全（条件 UPDATE，仅在仍为 `unused` 时命中）
 - 站点设置：站点名、副标题、公告、页脚、轮播间隔、广告总开关；保存后前台即时生效
 - 后台修改类接口校验同源 Origin；未登录返回 401，前端自动回到登录页
 
@@ -56,6 +56,7 @@
 - `UPSTREAM_LIST_TTL_MS` / `UPSTREAM_DETAIL_TTL_MS`：列表/详情缓存与入库有效期，默认 900000 / 1800000
 - `VOD_PAGE_SIZE`：前台/TVBox 列表每页条数，默认 40（10–100）
 - `ADMIN_PASSWORD`：数据库为空时的初始管理员密码，默认 `admin123`
+- `REQUIRE_CARD`：设为 `1` 开启卡密强制授权，片库列表/详情/搜索/TVBox 配置/播放解析均需携带有效卡密；默认关闭（公开访问）。开启后 TVBox 配置地址需带 `?code=XXX`，返回的 `api` 会自动透传卡密
 - `PUBLIC_URL`：对外域名，用于生成 TVBox api 与播放链接；未设置时按请求 Host 推断
 - `PORT`：本地监听端口，默认 8000（Vercel 不使用）
 

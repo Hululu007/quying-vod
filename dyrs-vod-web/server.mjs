@@ -86,6 +86,18 @@ const FOURK_QUALITY_LABELS = new Set(['1080P', '720P', '4K', '高清', '蓝光']
 const PUBLIC_URL = (process.env.PUBLIC_URL || '').replace(/\/+$/, '');
 const UPSTREAM_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS) || 5000;
 const PAGE_SIZE = Math.max(10, Math.min(100, Number(process.env.VOD_PAGE_SIZE) || 40));
+// 卡密强制授权开关：设为 1 时，片库列表/详情/搜索/TVBox 配置/播放解析均需携带有效卡密。
+// 默认关闭，保持向后兼容；线上 Vercel 配置 REQUIRE_CARD=1 开启。
+const REQUIRE_CARD = process.env.REQUIRE_CARD === '1';
+// 需要授权才能访问的路径（精确匹配）。公开路径：/api/health、/api/site、/api/ads、
+// /api/card/verify、/img、/api/admin/*、/admin 与静态前端。
+const AUTH_PROTECTED_PATHS = new Set([
+  '/api/vod/tvbox',
+  '/api/vod/list', '/api/vod/search', '/api/vod/detail',
+  '/api/vod/kan', '/api/vod/channels', '/api/vod/channel',
+  '/api.php/provide/vod', '/vod',
+  '/play.m3u8', '/resolve',
+]);
 // Upstream providers cap every page at 20 rows regardless of the limit param.
 const UPSTREAM_PAGE_SIZE = 20;
 // Upstream sites rate-limit aggressive clients. Space requests per host, keep
@@ -155,6 +167,11 @@ function sendJson(res, status, data) {
 
 // 公共只读响应：交给 Vercel 边缘 CDN 缓存，s-maxage 内不回源，降低冷启动与跨境延迟。
 function sendJsonCacheable(res, status, data, { maxAge = 30, sMaxAge = 300, stale = 1800 } = {}) {
+  // 授权模式下缩短边缘缓存：卡密可能已过期，避免边缘仍命中旧的 200 响应。
+  if (REQUIRE_CARD) {
+    sMaxAge = Math.min(sMaxAge, 60);
+    stale = Math.min(stale, 120);
+  }
   const body = JSON.stringify(data);
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
@@ -1826,14 +1843,18 @@ async function collectBatch({ pages = 3, force = false } = {}) {
   return { processed, skipped, cursor, cycleDone, total };
 }
 
-function tvboxConfig(base) {
+function tvboxConfig(base, code) {
+  // 授权模式下把卡密注入 api 地址，TVBox 后续 list/detail/play 请求自动透传。
+  const api = code
+    ? `${base}/api.php/provide/vod?code=${encodeURIComponent(code)}`
+    : `${base}/api.php/provide/vod`;
   return {
     name: '趣影',
     sites: [{
       key: 'quying',
       name: '趣影',
       type: 1,
-      api: `${base}/api.php/provide/vod`,
+      api,
       searchable: 1,
       quickSearch: 1,
       filterable: 1,
@@ -1866,6 +1887,33 @@ function parseCookies(req) {
     out[part.slice(0, idx).trim()] = decodeURIComponent(part.slice(idx + 1).trim());
   }
   return out;
+}
+
+// 从请求中提取授权卡密：query ?code= → X-Auth-Code 头 → qy_card cookie。
+// TVBox 配置地址带 ?code=XXX，后续请求会透传；Web 前台用 cookie。
+function extractCardCode(req, url) {
+  const q = url.searchParams.get('code');
+  if (q) return q.trim();
+  const h = req.headers['x-auth-code'];
+  if (h) return String(h).trim();
+  const c = parseCookies(req).qy_card;
+  if (c) return c.trim();
+  return '';
+}
+
+// 卡密强制授权中间件。返回 true 放行，false 表示已写入 401/503 响应，调用方应直接 return。
+async function enforceCardAuth(req, res, p, url) {
+  if (!REQUIRE_CARD || !AUTH_PROTECTED_PATHS.has(p)) return true;
+  if (!adminStore) {
+    sendJson(res, 503, { ok: false, error: '授权未启用：数据库不可用' });
+    return false;
+  }
+  const result = await adminStore.authorizeCard(extractCardCode(req, url));
+  if (!result.valid) {
+    sendJson(res, 401, { ok: false, error: result.reason || '需要有效授权卡密', code: 401 });
+    return false;
+  }
+  return true;
 }
 
 async function adminToken(req) {
@@ -2176,6 +2224,9 @@ export async function requestHandler(req, res) {
     return;
   }
 
+  // ---- 卡密强制授权：受保护路径（列表/详情/搜索/TVBox/播放）需携带有效卡密 ----
+  if (!(await enforceCardAuth(req, res, p, url))) return;
+
   // 后台页面
   if (p === '/admin' || p === '/admin/') {
     serveFile(res, path.join(PUBLIC_DIR, 'admin.html'));
@@ -2207,7 +2258,7 @@ export async function requestHandler(req, res) {
   }
 
   if (p === '/api/vod/tvbox') {
-    sendJsonCacheable(res, 200, tvboxConfig(base), { sMaxAge: 3600, maxAge: 60 });
+    sendJsonCacheable(res, 200, tvboxConfig(base, extractCardCode(req, url)), { sMaxAge: 3600, maxAge: 60 });
     return;
   }
 

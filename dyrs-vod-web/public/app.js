@@ -87,11 +87,60 @@
   }
   const clear = (n) => { while (n.firstChild) n.removeChild(n.firstChild); };
 
+  // ---- 授权卡密：本地存储 + 所有本站 API 请求自动透传 ----
+  const CARD_KEY = 'qy_card_code';
+  function cardCode() {
+    try { return (localStorage.getItem(CARD_KEY) || '').trim(); } catch { return ''; }
+  }
+  function withCode(path) {
+    const c = cardCode();
+    if (!c || !/^\//.test(path)) return path;
+    const sep = path.includes('?') ? '&' : '?';
+    return `${path}${sep}code=${encodeURIComponent(c)}`;
+  }
+  function showCardDialog(message) {
+    return new Promise((resolve) => {
+      const overlay = document.createElement('div');
+      overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:9999;';
+      const box = document.createElement('div');
+      box.style.cssText = 'background:#1a1a1a;color:#eee;padding:22px;border-radius:12px;width:320px;max-width:90vw;box-shadow:0 10px 40px rgba(0,0,0,.5);';
+      const title = document.createElement('div');
+      title.textContent = '授权卡密';
+      title.style.cssText = 'font-size:16px;font-weight:600;margin-bottom:8px;';
+      const msg = document.createElement('div');
+      msg.textContent = message || '请输入授权卡密以访问片库';
+      msg.style.cssText = 'font-size:13px;color:#999;margin-bottom:12px;';
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.placeholder = 'QY-XXXX-XXXX-XXXX';
+      input.value = cardCode();
+      input.style.cssText = 'width:100%;box-sizing:border-box;padding:10px;border:1px solid #333;border-radius:8px;background:#111;color:#eee;font-size:14px;';
+      const btns = document.createElement('div');
+      btns.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:14px;';
+      const cancel = document.createElement('button');
+      cancel.textContent = '取消';
+      cancel.style.cssText = 'padding:8px 14px;border:1px solid #333;background:transparent;color:#ccc;border-radius:8px;cursor:pointer;';
+      const ok = document.createElement('button');
+      ok.textContent = '确定';
+      ok.style.cssText = 'padding:8px 14px;border:none;background:#4a9eff;color:#fff;border-radius:8px;cursor:pointer;';
+      const close = (val) => { overlay.remove(); resolve(val); };
+      cancel.onclick = () => close(null);
+      ok.onclick = () => close(input.value.trim());
+      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') close(input.value.trim()); if (e.key === 'Escape') close(null); });
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) close(null); });
+      btns.appendChild(cancel); btns.appendChild(ok);
+      box.appendChild(title); box.appendChild(msg); box.appendChild(input); box.appendChild(btns);
+      overlay.appendChild(box);
+      document.body.appendChild(overlay);
+      setTimeout(() => input.focus(), 0);
+    });
+  }
+
   async function api(path, opts = {}) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), opts.timeout || 30000);
     try {
-      const res = await fetch(path, {
+      const res = await fetch(withCode(path), {
       method: opts.method || 'GET',
       headers: { Accept: 'application/json', ...(opts.body ? { 'Content-Type': 'application/json' } : {}) },
       body: opts.body ? JSON.stringify(opts.body) : undefined,
@@ -100,6 +149,15 @@
       const text = await res.text();
       let data = null;
       try { data = JSON.parse(text); } catch { /* non-json */ }
+      // 授权模式下接口返回 401：弹框让用户输入卡密后重试一次
+      if (res.status === 401 && !opts._retried) {
+        const c = await showCardDialog('访问需要授权卡密，请输入：');
+        if (c) {
+          try { localStorage.setItem(CARD_KEY, c); } catch {}
+          clearTimeout(timer);
+          return api(path, { ...opts, _retried: true });
+        }
+      }
       if (!res.ok || (data && data.ok === false)) {
         const msg = (data && data.error) || (data && data.msg) || `HTTP ${res.status}`;
         throw new Error(msg);
@@ -826,8 +884,12 @@
     const panel = el('div', { class: 'panel' });
     app.appendChild(panel);
     panel.appendChild(el('h3', {}, '配置地址'));
+    const card = cardCode();
+    if (!card) {
+      panel.appendChild(el('div', { class: 'banner warn', style: 'margin-bottom:10px' }, '未检测到授权卡密：请先点击右上角「授权」输入卡密，否则配置地址无法加载片库。'));
+    }
     const row = el('div', { class: 'copy-row' });
-    const cfgUrl = `${location.origin}/api/vod/tvbox`;
+    const cfgUrl = `${location.origin}/api/vod/tvbox${card ? '?code=' + encodeURIComponent(card) : ''}`;
     row.appendChild(el('code', {}, cfgUrl));
     const copyBtn = el('button', { class: 'btn', onclick: async () => {
       try { await navigator.clipboard.writeText(cfgUrl); copyBtn.textContent = '已复制 ✓'; setTimeout(() => copyBtn.textContent = '复制', 1500); }
@@ -921,7 +983,33 @@
   });
 
   // ---- boot ----
+  function injectCardButton() {
+    const nav = document.querySelector('nav.nav');
+    if (!nav) return;
+    const a = document.createElement('a');
+    a.href = '#';
+    a.className = 'nav-link';
+    a.id = 'cardNavBtn';
+    a.textContent = cardCode() ? '授权 ✓' : '授权';
+    a.addEventListener('click', async (e) => {
+      e.preventDefault();
+      const c = await showCardDialog(cardCode() ? '更新授权卡密（留空并确定可清除）：' : '请输入授权卡密以访问片库：');
+      if (c != null) {
+        if (c) { try { localStorage.setItem(CARD_KEY, c); } catch {} }
+        else { try { localStorage.removeItem(CARD_KEY); } catch {} }
+        a.textContent = cardCode() ? '授权 ✓' : '授权';
+      }
+    });
+    nav.appendChild(a);
+  }
+
   async function boot() {
+    // URL 带 ?code= 时落地到本地，便于分享带授权的链接
+    try {
+      const urlCode = bootParams.get('code');
+      if (urlCode) localStorage.setItem(CARD_KEY, urlCode.trim());
+    } catch {}
+    injectCardButton();
     try {
       const conf = await api('/api/site');
       site = { ...site, ...conf };

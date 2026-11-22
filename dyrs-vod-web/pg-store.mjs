@@ -88,6 +88,23 @@ function randomCode(prefix = 'QY') {
   const seg = () => Array.from({ length: 4 }, () => CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)]).join('');
   return `${prefix}-${seg()}-${seg()}-${seg()}`;
 }
+const DAY_MS = 86400000;
+function cardExpiry(row) {
+  return row && row.used_at ? row.used_at + Number(row.days) * DAY_MS : null;
+}
+// 授权语义评估：unused 未核销、used 在有效期内 → 有效；disabled/过期 → 无效。
+function assessCard(row, nowMs) {
+  if (!row) return { valid: false, reason: '卡密不存在' };
+  if (row.status === 'disabled') return { valid: false, reason: '卡密已停用', expiresAt: cardExpiry(row) };
+  const exp = cardExpiry(row);
+  if (exp != null && exp <= nowMs) return { valid: false, reason: '卡密已过期', expiresAt: exp };
+  return {
+    valid: true,
+    days: Number(row.days),
+    expiresAt: exp != null ? exp : nowMs + Number(row.days) * DAY_MS,
+    fresh: row.used_at == null,
+  };
+}
 function hashPassword(password) {
   // 与 admin-store.mjs 保持同格式：scrypt$salt$hash，避免迁移后旧密码失效。
   const salt = crypto.randomBytes(16).toString('hex');
@@ -685,19 +702,29 @@ export class PgAdminStore {
     );
     return {
       total, page: current, pagecount: Math.max(1, Math.ceil(total / size)),
-      list: rows.map((row) => ({
-        id: row.id, code: row.code, days: row.days, status: row.status, note: row.note,
-        usedAt: row.used_at, createdAt: row.created_at,
-      })),
+      list: rows.map((row) => {
+        const exp = cardExpiry(row);
+        return {
+          id: row.id, code: row.code, days: row.days, status: row.status, note: row.note,
+          usedAt: row.used_at, createdAt: row.created_at,
+          expiresAt: exp,
+          expired: row.status === 'used' && exp != null && exp <= now(),
+        };
+      }),
     };
   }
 
   async exportCards() {
     const rows = await this._q('SELECT * FROM card_keys ORDER BY id DESC');
-    return rows.map((row) => ({
-      code: row.code, days: row.days, status: row.status, note: row.note,
-      usedAt: row.used_at, createdAt: row.created_at,
-    }));
+    return rows.map((row) => {
+      const exp = cardExpiry(row);
+      return {
+        code: row.code, days: row.days, status: row.status, note: row.note,
+        usedAt: row.used_at, createdAt: row.created_at,
+        expiresAt: exp,
+        expired: row.status === 'used' && exp != null && exp <= now(),
+      };
+    });
   }
 
   async setCardStatus(id, status) {
@@ -711,13 +738,33 @@ export class PgAdminStore {
     return result.rowCount > 0;
   }
 
+  // 查询卡密当前是否有效（不核销）。授权语义：未核销或已核销且在有效期内均有效。
   async verifyCard(code) {
     const rows = await this._q('SELECT * FROM card_keys WHERE code = $1', [str(code, 40).toUpperCase()]);
-    const row = rows[0];
-    if (!row) return { valid: false, reason: '卡密不存在' };
-    if (row.status === 'disabled') return { valid: false, reason: '卡密已停用' };
-    if (row.status === 'used') return { valid: false, reason: '卡密已使用' };
-    return { valid: true, days: row.days };
+    return assessCard(rows[0], now());
+  }
+
+  // 强制授权校验：未核销则原子核销（status→used、写 used_at），已核销则检查有效期。
+  // 并发安全：仅在仍为 unused 时更新，命中 0 行说明被抢先核销，重读后按有效期判定。
+  async authorizeCard(code) {
+    const key = str(code, 40).toUpperCase();
+    if (!key) return { valid: false, reason: '缺少授权卡密' };
+    const rows = await this._q('SELECT * FROM card_keys WHERE code = $1', [key]);
+    const v = assessCard(rows[0], now());
+    if (!v.valid) return v;
+    if (v.fresh) {
+      const nowMs = now();
+      const res = await this.pool.query(
+        "UPDATE card_keys SET status='used', used_at=$1 WHERE code=$2 AND status='unused'",
+        [nowMs, key],
+      );
+      if (res.rowCount > 0) {
+        return { valid: true, days: v.days, expiresAt: nowMs + v.days * DAY_MS, fresh: true };
+      }
+      const rows2 = await this._q('SELECT * FROM card_keys WHERE code = $1', [key]);
+      return assessCard(rows2[0], now());
+    }
+    return v;
   }
 
   async overview() {

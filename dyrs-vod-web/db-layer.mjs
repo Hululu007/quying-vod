@@ -11,7 +11,7 @@ const ADMIN_METHODS = [
   'createSession', 'validateSession', 'destroySession',
   'listAds', 'publicAds', 'createAd', 'updateAd', 'deleteAd',
   'generateCards', 'listCards', 'exportCards', 'setCardStatus', 'deleteCard',
-  'verifyCard', 'overview',
+  'verifyCard', 'authorizeCard', 'overview',
   'listManualVods', 'saveManualVod', 'deleteManualVod',
 ];
 
