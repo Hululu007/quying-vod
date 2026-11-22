@@ -14,6 +14,8 @@ export const DEFAULT_LIVE_SOURCES = [
   // === 国内台主力 ===
   { name: 'fmml_itv',   url: 'https://m3u.ibert.me/fmml_itv.m3u' },
   { name: 'o_s_cn',     url: 'https://m3u.ibert.me/o_s_cn.m3u' },
+  // vbskycn 直连 GitHub（不走 gh-proxy）：317 条，地方频道 177 条实测抽样全活，是地方台主力
+  { name: 'vbskycn',    url: 'https://raw.githubusercontent.com/vbskycn/iptv/master/tv/iptv4.m3u' },
   // === iptv-org 分类精选（公网 CDN，可达率 40-80%，少儿/体育/电影/综艺/音乐/教育/纪录片） ===
   { name: 'iptv-org-kids',       url: 'https://iptv-org.github.io/iptv/categories/kids.m3u' },
   { name: 'iptv-org-sports',     url: 'https://iptv-org.github.io/iptv/categories/sports.m3u' },
@@ -31,7 +33,7 @@ export const DEFAULT_LIVE_SOURCES = [
 // 已知完全不可用的源：vbskycn（gh-proxy.com 长期 403）、以及其它历史上连续挂掉的源。
 // 这些在 DEFAULT_LIVE_SOURCES 中直接移除，用户显式设置 LIVE_SOURCES 可以覆盖。
 export const DISABLED_LIVE_SOURCES = [
-  { name: 'vbskycn', url: 'https://gh-proxy.com/raw.githubusercontent.com/vbskycn/iptv/refs/heads/master/tv/iptv4.m3u', reason: 'gh-proxy.com 镜像持续 403，清单完全不可达' },
+  { name: 'vbskycn-ghproxy', url: 'https://gh-proxy.com/raw.githubusercontent.com/vbskycn/iptv/refs/heads/master/tv/iptv4.m3u', reason: 'gh-proxy.com 镜像持续 403；已改用 raw.githubusercontent.com 直连（见 vbskycn 默认源）' },
   { name: 'fmml_index', url: 'https://m3u.ibert.me/fmml_index.m3u', reason: '0/40 可达率，host 58.248.112.205 全死' },
   { name: 'ycl_iptv', url: 'https://m3u.ibert.me/ycl_iptv.m3u', reason: '全是 RTSP/UDP 组播，公网不可用' },
   { name: 'fmml_ipv6', url: 'https://m3u.ibert.me/fmml_ipv6.m3u', reason: '清单内全是 IPv6 分片地址，Vercel/Cloudflare IPv4-only 生产环境不可达（ENETUNREACH）' },
