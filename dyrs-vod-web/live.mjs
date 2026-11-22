@@ -60,14 +60,39 @@ function readLocalLiveSources() {
 function cleanName(value) {
   return String(value || '')
     .normalize('NFKC')
+    .replace(/^\s*[\[【][^\]】]*[\]】]\s*/, '')          // 去掉 [BD]、[高清] 这类前导标记
+    .replace(/\s*[\[【(（][^\]】)）]*[\]】)）]\s*$/g, '') // 去掉所有 (720p)、[Not 24/7] 类后缀
+    .replace(/\s+(?:50|60)\s*fps\b/gi, '')               // 独立后缀 " 50 FPS" / " 60 FPS"（先删，避免频道号被一起吞）
+    .replace(/\s*hevc\b/gi, '')                           // HEVC
+    .replace(/\s*plus\b/gi, '+')                          // 统一 Plus → +
     .replace(/\s+/g, ' ')
-    .replace(/\s*[\[【(（](?:hd|fhd|uhd|4k|1080p|高清|超清)[\]】)）]\s*$/i, '')
-    .replace(/\s+(?:hd|fhd|uhd|4k|1080p)$/i, '')
     .trim();
 }
 
+// 规范化频道名 → canonical key，用于跨源合并同名台。
+// 核心是把不同源的写法（"CCTV 1"、"CCTV-1"、"cctv1"、"CCTV-1综合"）都映射到同一个 key。
 function nameKey(value) {
-  return cleanName(value).toLowerCase().replace(/[\s\-_–—·•]+/g, '');
+  const raw = cleanName(value).toLowerCase();
+  // CCTV/CETV 数字台：先去掉中文后缀（"综合"/"新闻"/"中文国际" 等），再统一取字母+数字
+  // "cctv-1综合" → strip 中文 → "cctv-1" → 提取 → "cctv1"
+  // "cctv 1" → 提取 → "cctv1"
+  // "cctv5 plus" → 提取 → "cctv5+"
+  const stripped = raw.replace(/[\u4e00-\u9fa5]+/g, '').trim(); // 先去掉所有中文
+  const cctvMatch = stripped.match(/(cctv|cetv)\s*[-]?\s*(\d+)\s*(?:\+|plus)?/);
+  if (cctvMatch) {
+    const plus = /\+|plus/i.test(raw) ? '+' : '';
+    return `${cctvMatch[1]}${cctvMatch[2]}${plus}`; // cctv1 / cetv3 / cctv5+
+  }
+  // CGTN / BTV 北京台（无数字或有特殊词）
+  if (/^cgtn/.test(raw)) return 'cgtn';
+  if (/^btv\b|brtv|北京卫视/.test(raw)) return '北京卫视';
+  // 卫视名：提取 "XX卫视" 核心（允许中间有 "BRTV"/"dragon tv" 这类杂质）
+  const weishiMatch = raw.match(/([\u4e00-\u9fa5]{2,8}卫视)/);
+  if (weishiMatch) return weishiMatch[1];
+  // 东方卫视 / Dragon TV 特例
+  if (/东方卫视|dragon\s*tv/i.test(raw)) return '东方卫视';
+  // 通用：去空格去标点 → 纯文本 key
+  return raw.replace(/[\s\-_–—·•.,!?()（）\[\]【】]+/g, '').replace(/\d+p?$/, '');
 }
 
 function httpUrl(value, { media = false } = {}) {
