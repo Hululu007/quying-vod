@@ -9,11 +9,11 @@ export const LIVE_GROUP_NAMES = ['央视', '卫视', '地方', '体育', '影视
 export const LIVE_EPG_URL = 'http://epg.51zmt.top:8000/e.xml';
 // 源顺序 = 线路优先级。前面的源先合并 → 频道的 lines[0] 来自可达率最高的源。
 // 分片探针自动淘汰假活源（运营商鉴权过期等），此处只列清单源，探针会兜底筛。
+// cn（epg.pw）、myIPTV 已移除：死链比例过高，收益低于采集耗时，需要时可在 LIVE_SOURCES 显式加回。
 export const DEFAULT_LIVE_SOURCES = [
   // === 国内台主力 ===
   { name: 'fmml_itv',   url: 'https://m3u.ibert.me/fmml_itv.m3u' },
   { name: 'o_s_cn',     url: 'https://m3u.ibert.me/o_s_cn.m3u' },
-  { name: 'cn',         url: 'https://m3u.ibert.me/cn.m3u' },
   // === iptv-org 分类精选（公网 CDN，可达率 40-80%，少儿/体育/电影/综艺/音乐/教育/纪录片） ===
   { name: 'iptv-org-kids',       url: 'https://iptv-org.github.io/iptv/categories/kids.m3u' },
   { name: 'iptv-org-sports',     url: 'https://iptv-org.github.io/iptv/categories/sports.m3u' },
@@ -26,7 +26,6 @@ export const DEFAULT_LIVE_SOURCES = [
   // === 全量兜底 ===
   { name: 'iptv-org-all', url: 'https://iptv-org.github.io/iptv/index.m3u' },
   { name: 'ZBDS',         url: 'https://live.zbds.top/tv/iptv4.m3u' },
-  { name: 'myIPTV',       url: 'https://raw.githubusercontent.com/suxuang/myIPTV/main/ipv4.m3u' },
 ];
 
 // 已知完全不可用的源：vbskycn（gh-proxy.com 长期 403）、以及其它历史上连续挂掉的源。
@@ -36,6 +35,8 @@ export const DISABLED_LIVE_SOURCES = [
   { name: 'fmml_index', url: 'https://m3u.ibert.me/fmml_index.m3u', reason: '0/40 可达率，host 58.248.112.205 全死' },
   { name: 'ycl_iptv', url: 'https://m3u.ibert.me/ycl_iptv.m3u', reason: '全是 RTSP/UDP 组播，公网不可用' },
   { name: 'fmml_ipv6', url: 'https://m3u.ibert.me/fmml_ipv6.m3u', reason: '清单内全是 IPv6 分片地址，Vercel/Cloudflare IPv4-only 生产环境不可达（ENETUNREACH）' },
+  { name: 'cn', url: 'https://m3u.ibert.me/cn.m3u', reason: '死链比例过高（stream1.freetv.fun 多次全死），采集耗时大于收益' },
+  { name: 'myIPTV', url: 'https://raw.githubusercontent.com/suxuang/myIPTV/main/ipv4.m3u', reason: '1201 条中大量死链，收益低于采集耗时' },
 ];
 
 // 可选本地 assets/ 兜底：用户可在 dyrs-vod-web/assets/ 或 public/assets/ 放置 .m3u 文件，
