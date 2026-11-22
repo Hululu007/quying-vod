@@ -1,0 +1,22 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+
+const index = fs.readFileSync(new URL('./public/index.html', import.meta.url), 'utf8');
+const app = fs.readFileSync(new URL('./public/app.js', import.meta.url), 'utf8');
+const styles = fs.readFileSync(new URL('./public/styles.css', import.meta.url), 'utf8');
+
+test('前台导航包含直播入口并接入直播视图', () => {
+  assert.match(index, /data-view="live"/);
+  assert.match(app, /function renderLive\(\)/);
+  assert.match(app, /v === 'live'/);
+});
+
+test('直播页接入分组频道接口与 HLS 多线路播放器', () => {
+  assert.match(app, /\/api\/live\/groups/);
+  assert.match(app, /\/api\/live\/channels/);
+  assert.match(app, /new window\.Hls\(/);
+  assert.match(app, /loadLiveLine/);
+  assert.match(styles, /\.live-layout/);
+  assert.match(styles, /\.live-channel/);
+});

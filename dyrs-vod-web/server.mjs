@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { DEFAULT_LIVE_SOURCES, LIVE_EPG_URL, LIVE_GROUP_NAMES, LiveCollector, buildLiveM3U, queryLiveChannels } from './live.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -97,6 +98,7 @@ const AUTH_PROTECTED_PATHS = new Set([
   '/api/vod/kan', '/api/vod/channels', '/api/vod/channel',
   '/api.php/provide/vod', '/vod',
   '/play.m3u8', '/resolve',
+  '/api/live/groups', '/api/live/channels', '/live.m3u',
 ]);
 // Upstream providers cap every page at 20 rows regardless of the limit param.
 const UPSTREAM_PAGE_SIZE = 20;
@@ -114,6 +116,11 @@ const TTL = {
   tvbox: 3600000,
 };
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+const LIVE_FETCH_TIMEOUT_MS = Math.max(1000, Number(process.env.LIVE_FETCH_TIMEOUT_MS) || 20000);
+const LIVE_CACHE_TTL_MS = Math.max(0, Number(process.env.LIVE_CACHE_TTL_MS ?? '21600000') || 0);
+const LIVE_SOURCES = process.env.LIVE_SOURCES
+  ? process.env.LIVE_SOURCES.split(',').map((url) => url.trim()).filter(Boolean).map((url, index) => ({ name: `自定义源${index + 1}`, url }))
+  : DEFAULT_LIVE_SOURCES;
 
 // Headline categories exposed by this site. The provider only tags leaves, so
 // each headline category is the merge of its child type ids.
@@ -345,9 +352,11 @@ function normalizeItem(v, base, withPlay) {
 function httpGetText(target, opts = {}) {
   return new Promise((resolveRequest) => {
     let settled = false;
+    let totalTimer = null;
     const resolve = (value) => {
       if (settled) return;
       settled = true;
+      if (totalTimer) clearTimeout(totalTimer);
       resolveRequest(value);
     };
     let parsed;
@@ -391,6 +400,9 @@ function httpGetText(target, opts = {}) {
       resp.on('error', (e) => resolve({ status: 0, error: String((e && e.message) || e) }));
     });
     req.on('error', (e) => resolve({ status: 0, error: String((e && e.message) || e) }));
+    // setTimeout 只限制 socket 空闲时间；总计时器同时限制持续慢速传输，避免清单永远不结束。
+    totalTimer = setTimeout(() => req.destroy(new Error('upstream timeout')), remaining);
+    if (typeof totalTimer.unref === 'function') totalTimer.unref();
     req.setTimeout(Math.min(opts.timeout || UPSTREAM_TIMEOUT_MS, remaining), () => req.destroy(new Error('upstream timeout')));
   });
 }
@@ -441,6 +453,30 @@ function upstreamFailure(message, { blocked = false } = {}) {
   error.blocked = blocked;
   return error;
 }
+
+const liveCollector = new LiveCollector({
+  sources: LIVE_SOURCES,
+  ttl: LIVE_CACHE_TTL_MS,
+  fetchText: async (target) => {
+    const origin = new URL(target).origin;
+    if (hostCooling(origin)) throw new Error('直播源冷却中');
+    await hostSlot(origin);
+    const r = await httpGetText(target, {
+      headers: { 'User-Agent': UA, Accept: 'application/x-mpegURL,text/plain,*/*', 'Accept-Encoding': 'identity' },
+      timeout: LIVE_FETCH_TIMEOUT_MS,
+      deadline: Date.now() + LIVE_FETCH_TIMEOUT_MS,
+      followRedirects: true,
+    });
+    if (r.error || r.status < 200 || r.status >= 300) {
+      coolHost(origin, UPSTREAM_COOLDOWN_MS);
+      throw new Error(r.error || `HTTP ${r.status}`);
+    }
+    if (!r.body || r.body.length > 40 * 1024 * 1024) throw new Error('直播清单为空或过大');
+    const body = r.body.toString('utf8');
+    if (!body.replace(/^\uFEFF/, '').trimStart().startsWith('#EXTM3U')) throw new Error('直播清单格式无效');
+    return body;
+  },
+});
 
 async function upstreamJson(params, ttl) {
   const qs = buildQuery(params);
@@ -2030,7 +2066,12 @@ function tvboxConfig(base, code) {
       quickSearch: 1,
       filterable: 1,
     }],
-    lives: [],
+    lives: [{
+      name: '趣影直播',
+      type: 0,
+      url: `${base}/live.m3u${code ? `?code=${encodeURIComponent(code)}` : ''}`,
+      epg: LIVE_EPG_URL,
+    }],
     parses: [],
     flags: [],
   };
@@ -2369,7 +2410,7 @@ export async function requestHandler(req, res) {
     return;
   }
 
-  if (req.method !== 'GET' && !(req.method === 'POST' && p === '/api/vod/channel')) {
+  if (req.method !== 'GET' && !(req.method === 'POST' && (p === '/api/vod/channel' || p === '/api/live/refresh'))) {
     sendJson(res, 405, { ok: false, error: 'method not allowed' });
     return;
   }
@@ -2398,6 +2439,65 @@ export async function requestHandler(req, res) {
 
   // ---- 卡密强制授权：受保护路径（列表/详情/搜索/TVBox/播放）需携带有效卡密 ----
   if (!(await enforceCardAuth(req, res, p, url))) return;
+
+  // ---- 直播：多源 M3U 采集、同名合并与分页查询，播放地址由客户端直连 ----
+  if (p === '/api/live/refresh') {
+    if (req.method !== 'POST') { sendJson(res, 405, { ok: false, error: 'method not allowed' }); return; }
+    if (!adminStore) { sendJson(res, 503, { ok: false, error: '后台未启用：数据库不可用' }); return; }
+    if (!await adminToken(req)) { sendJson(res, 401, { ok: false, error: '请先登录' }); return; }
+    if (!sameOrigin(req)) { sendJson(res, 403, { ok: false, error: '跨站请求被拒绝' }); return; }
+    try {
+      const snapshot = await liveCollector.getSnapshot({ force: true });
+      sendJson(res, 200, { ok: true, updatedAt: snapshot.updatedAt, total: snapshot.channels.length, groups: snapshot.groups, sources: snapshot.sources });
+    } catch (error) {
+      sendJson(res, 502, { ok: false, error: String((error && error.message) || error) });
+    }
+    return;
+  }
+
+  if (p === '/api/live/groups' || p === '/api/live/channels' || p === '/live.m3u') {
+    let snapshot;
+    try {
+      snapshot = await liveCollector.getSnapshot();
+    } catch (error) {
+      sendJson(res, 502, { ok: false, error: String((error && error.message) || error) });
+      return;
+    }
+    if (p === '/api/live/groups') {
+      sendJsonCacheable(res, 200, {
+        ok: true,
+        total: snapshot.channels.length,
+        updatedAt: snapshot.updatedAt,
+        stale: snapshot.stale,
+        groups: snapshot.groups,
+        sources: snapshot.sources,
+      }, { sMaxAge: 300, maxAge: 30 });
+      return;
+    }
+    if (p === '/api/live/channels') {
+      const group = String(url.searchParams.get('group') || '').trim();
+      if (group && !LIVE_GROUP_NAMES.includes(group)) { sendJson(res, 400, { ok: false, error: 'unknown live group' }); return; }
+      const result = queryLiveChannels(snapshot.channels, {
+        group,
+        wd: String(url.searchParams.get('wd') || '').trim().slice(0, 60),
+        page: url.searchParams.get('pg'),
+        size: url.searchParams.get('size'),
+      });
+      sendJsonCacheable(res, 200, { ok: true, ...result, updatedAt: snapshot.updatedAt, stale: snapshot.stale }, { sMaxAge: 300, maxAge: 30 });
+      return;
+    }
+    const body = buildLiveM3U(snapshot.channels);
+    const edgeAge = REQUIRE_CARD ? 60 : 3600;
+    res.writeHead(200, {
+      'Content-Type': 'application/x-mpegURL; charset=utf-8',
+      'Content-Length': Buffer.byteLength(body),
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': `public, max-age=60, s-maxage=${edgeAge}, stale-while-revalidate=300`,
+      'Cloudflare-CDN-Cache-Control': `max-age=${edgeAge}, stale-while-revalidate=300`,
+    });
+    res.end(body);
+    return;
+  }
 
   // 后台页面
   if (p === '/admin' || p === '/admin/') {

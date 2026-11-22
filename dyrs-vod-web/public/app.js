@@ -874,12 +874,312 @@
   modal.addEventListener('click', (e) => { if (e.target.dataset.close !== undefined) closeModal(); });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
 
+  // ---- 电视直播：多源频道、HLS 播放与线路自动切换 ----
+  const liveState = {
+    group: '', wd: '', pg: 1, size: 60, pagecount: 1, total: 0, totalAll: 0,
+    groups: [], channels: [], current: null, lineIndex: 0,
+    hls: null, retryTimer: null, watchdog: null, token: 0, request: 0,
+  };
+  let hlsLoader = null;
+
+  function liveStatus(text) {
+    const node = document.getElementById('liveStatus');
+    if (node) node.textContent = text;
+  }
+
+  function stopLivePlayback() {
+    liveState.token += 1;
+    clearTimeout(liveState.retryTimer);
+    clearTimeout(liveState.watchdog);
+    liveState.retryTimer = null;
+    liveState.watchdog = null;
+    if (liveState.hls) {
+      try { liveState.hls.destroy(); } catch {}
+      liveState.hls = null;
+    }
+    const video = document.getElementById('liveVideo');
+    if (video) {
+      video.onerror = null;
+      video.onplaying = null;
+      video.onloadedmetadata = null;
+      video.pause();
+      video.removeAttribute('src');
+      video.load();
+    }
+  }
+
+  function ensureHls() {
+    if (window.Hls) return Promise.resolve(window.Hls);
+    if (hlsLoader) return hlsLoader;
+    hlsLoader = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      const timer = setTimeout(() => { script.remove(); reject(new Error('播放器组件加载超时')); }, 15000);
+      script.src = 'https://cdn.jsdelivr.net/npm/hls.js@1.5.20/dist/hls.min.js';
+      script.onload = () => { clearTimeout(timer); window.Hls ? resolve(window.Hls) : reject(new Error('播放器组件不可用')); };
+      script.onerror = () => { clearTimeout(timer); script.remove(); reject(new Error('播放器组件加载失败')); };
+      document.head.appendChild(script);
+    });
+    return hlsLoader;
+  }
+
+  function updateLiveActive() {
+    document.querySelectorAll('.live-channel').forEach((node) => {
+      node.classList.toggle('active', Boolean(liveState.current) && node.dataset.id === liveState.current.id);
+    });
+    document.querySelectorAll('.live-line').forEach((node) => {
+      node.classList.toggle('active', Number(node.dataset.line) === liveState.lineIndex);
+    });
+  }
+
+  function failLiveLine(channel, index, token, message) {
+    if (token !== liveState.token || liveState.retryTimer) return;
+    clearTimeout(liveState.watchdog);
+    const next = index + 1;
+    if (next < channel.lines.length) {
+      liveStatus(`${message}，即将切换线路 ${next + 1}…`);
+      liveState.retryTimer = setTimeout(() => {
+        liveState.retryTimer = null;
+        loadLiveLine(channel, next);
+      }, 800);
+    } else {
+      liveStatus(`全部线路暂不可用（${message}）。可稍后重试或选择其他频道。`);
+    }
+  }
+
+  async function loadLiveLine(channel, index) {
+    if (!channel || !channel.lines[index]) return;
+    stopLivePlayback();
+    const token = liveState.token;
+    liveState.current = channel;
+    liveState.lineIndex = index;
+    updateLiveActive();
+    const line = channel.lines[index];
+    const video = document.getElementById('liveVideo');
+    if (!video) return;
+    const empty = document.getElementById('livePlayerEmpty');
+    if (empty) empty.classList.add('hidden');
+    liveStatus(`正在连接线路 ${index + 1} · ${line.source || '直播源'}…`);
+    if (location.protocol === 'https:' && line.url.startsWith('http:')) {
+      failLiveLine(channel, index, token, 'HTTPS 页面无法直连 HTTP 线路');
+      return;
+    }
+    liveState.watchdog = setTimeout(() => failLiveLine(channel, index, token, '连接超时'), 15000);
+    video.onplaying = () => {
+      if (token !== liveState.token) return;
+      clearTimeout(liveState.watchdog);
+      liveStatus(`正在播放 · 线路 ${index + 1} · ${line.source || '直播源'}${video.muted ? '（默认静音，可手动取消）' : ''}`);
+    };
+    video.onloadedmetadata = () => {
+      if (token !== liveState.token) return;
+      clearTimeout(liveState.watchdog);
+    };
+    video.onerror = () => failLiveLine(channel, index, token, '播放失败');
+
+    if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      video.src = line.url;
+      video.play().catch(() => liveStatus('线路已加载，点击播放器开始播放'));
+      return;
+    }
+    try {
+      const Hls = await ensureHls();
+      if (token !== liveState.token) return;
+      if (!Hls.isSupported()) {
+        failLiveLine(channel, index, token, '当前浏览器不支持 HLS');
+        return;
+      }
+      const hls = new window.Hls({
+        liveSyncDurationCount: 3,
+        manifestLoadingTimeOut: 12000,
+        levelLoadingTimeOut: 12000,
+        fragLoadingTimeOut: 15000,
+      });
+      liveState.hls = hls;
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (token !== liveState.token) return;
+        video.play().catch(() => liveStatus('线路已加载，点击播放器开始播放'));
+      });
+      hls.on(Hls.Events.ERROR, (event, data) => {
+        if (data && data.fatal) failLiveLine(channel, index, token, '直播流连接失败');
+      });
+      hls.loadSource(line.url);
+      hls.attachMedia(video);
+    } catch (error) {
+      failLiveLine(channel, index, token, error.message || '播放器初始化失败');
+    }
+  }
+
+  function selectLiveChannel(channel) {
+    if (!channel) return;
+    liveState.current = channel;
+    const name = document.getElementById('liveChannelName');
+    const badge = document.getElementById('liveGroupBadge');
+    if (name) name.textContent = channel.name;
+    if (badge) badge.textContent = channel.group || '直播';
+    const lines = document.getElementById('liveLines');
+    if (lines) {
+      clear(lines);
+      channel.lines.forEach((line, index) => {
+        lines.appendChild(el('button', {
+          class: 'live-line', 'data-line': index, title: line.url,
+          onclick: () => loadLiveLine(channel, index),
+        }, `线路 ${index + 1} · ${line.source || '直播源'}`));
+      });
+    }
+    loadLiveLine(channel, 0);
+    if (window.innerWidth < 900) {
+      const panel = document.getElementById('livePlayerPanel');
+      if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }
+
+  function renderLiveGroupTabs() {
+    const host = document.getElementById('liveGroups');
+    if (!host) return;
+    clear(host);
+    const items = [{ id: '', name: '全部', count: liveState.totalAll }, ...liveState.groups];
+    items.forEach((group) => {
+      host.appendChild(el('button', {
+        class: `pill${liveState.group === group.id ? ' active' : ''}`,
+        onclick: () => { liveState.group = group.id; liveState.pg = 1; renderLiveGroupTabs(); loadLiveChannels(); },
+      }, `${group.name} ${group.count}`));
+    });
+  }
+
+  async function loadLiveGroups() {
+    const data = await api('/api/live/groups');
+    liveState.groups = Array.isArray(data.groups) ? data.groups : [];
+    liveState.totalAll = Number(data.total) || 0;
+    renderLiveGroupTabs();
+    const meta = document.getElementById('liveMeta');
+    if (meta) {
+      const okSources = (data.sources || []).filter((source) => source.ok).length;
+      const time = data.updatedAt ? new Date(data.updatedAt).toLocaleString('zh-CN', { hour12: false }) : '';
+      meta.textContent = `${liveState.totalAll} 个频道 · ${okSources}/${(data.sources || []).length} 个清单源正常${time ? ` · 更新于 ${time}` : ''}${data.stale ? ' · 当前为故障兜底快照' : ''}`;
+    }
+  }
+
+  async function loadLiveChannels() {
+    const request = ++liveState.request;
+    const host = document.getElementById('liveChannelList');
+    if (!host) return;
+    clear(host);
+    host.appendChild(spinner('频道加载中…'));
+    try {
+      const params = new URLSearchParams({ pg: String(liveState.pg), size: String(liveState.size) });
+      if (liveState.group) params.set('group', liveState.group);
+      if (liveState.wd) params.set('wd', liveState.wd);
+      const data = await api(`/api/live/channels?${params}`);
+      if (request !== liveState.request) return;
+      liveState.channels = Array.isArray(data.list) ? data.list : [];
+      liveState.total = Number(data.total) || 0;
+      liveState.pg = Number(data.page) || 1;
+      liveState.pagecount = Number(data.pagecount) || 1;
+      clear(host);
+      const count = document.getElementById('liveCount');
+      if (count) count.textContent = `${liveState.total} 个频道`;
+      if (!liveState.channels.length) {
+        host.appendChild(el('div', { class: 'empty' }, '没有符合条件的频道'));
+      } else {
+        liveState.channels.forEach((channel) => {
+          const logo = el('span', { class: 'live-channel-logo' }, channel.name.slice(0, 1));
+          if (channel.logo) {
+            const img = el('img', { src: channel.logo, alt: '', loading: 'lazy', onerror: () => img.remove() });
+            logo.appendChild(img);
+          }
+          host.appendChild(el('button', {
+            class: 'live-channel', 'data-id': channel.id,
+            onclick: () => selectLiveChannel(channel),
+          }, [
+            logo,
+            el('span', { class: 'live-channel-info' }, [
+              el('span', { class: 'live-channel-name', title: channel.name }, channel.name),
+              el('span', { class: 'live-channel-meta' }, `${channel.group} · ${channel.lines.length} 条线路`),
+            ]),
+          ]));
+        });
+      }
+      const pager = document.getElementById('livePager');
+      if (pager) {
+        clear(pager);
+        if (liveState.pagecount > 1) {
+          pager.appendChild(el('button', { class: 'btn ghost', disabled: liveState.pg <= 1, onclick: () => { liveState.pg -= 1; loadLiveChannels(); } }, '上一页'));
+          pager.appendChild(el('span', { class: 'page-info' }, `${liveState.pg} / ${liveState.pagecount}`));
+          pager.appendChild(el('button', { class: 'btn ghost', disabled: liveState.pg >= liveState.pagecount, onclick: () => { liveState.pg += 1; loadLiveChannels(); } }, '下一页'));
+        }
+      }
+      const current = liveState.channels.find((channel) => liveState.current && channel.id === liveState.current.id);
+      if (current) selectLiveChannel(current);
+      else if (liveState.channels[0]) selectLiveChannel(liveState.channels[0]);
+      else {
+        stopLivePlayback();
+        liveState.current = null;
+        const name = document.getElementById('liveChannelName');
+        if (name) name.textContent = '未选择频道';
+        liveStatus('请选择其他分组或修改搜索词');
+      }
+    } catch (error) {
+      if (request !== liveState.request) return;
+      clear(host);
+      host.appendChild(banner('warn', `频道加载失败：${error.message}`));
+      host.appendChild(el('button', { class: 'btn ghost', onclick: loadLiveChannels }, '重试'));
+    }
+  }
+
+  function renderLive() {
+    stopLivePlayback();
+    clear(app);
+    app.appendChild(el('section', { class: 'hero live-hero' }, [
+      el('h2', {}, '电视直播'),
+      el('p', {}, '聚合多份公开 M3U 清单，同名频道自动合并多线路。播放由浏览器直连直播源，失效线路会自动切换。'),
+      el('div', { class: 'live-meta', id: 'liveMeta' }, '正在采集直播清单…'),
+    ]));
+    const search = el('input', {
+      type: 'search', id: 'liveSearchInput', placeholder: '搜索频道名…', value: liveState.wd,
+      onkeydown: (event) => { if (event.key === 'Enter') { liveState.wd = search.value.trim(); liveState.pg = 1; loadLiveChannels(); } },
+    });
+    app.appendChild(el('section', { class: 'cat-panel live-controls' }, [
+      el('div', { class: 'live-group-bar', id: 'liveGroups' }),
+      el('div', { class: 'live-search-row' }, [
+        search,
+        el('button', { class: 'btn', onclick: () => { liveState.wd = search.value.trim(); liveState.pg = 1; loadLiveChannels(); } }, '搜索'),
+        el('a', { class: 'btn ghost', href: withCode('/live.m3u'), target: '_blank', rel: 'noopener' }, '合并 M3U'),
+      ]),
+    ]));
+    app.appendChild(el('div', { class: 'live-layout' }, [
+      el('section', { class: 'live-player-panel', id: 'livePlayerPanel' }, [
+        el('div', { class: 'live-video-wrap' }, [
+          el('video', { id: 'liveVideo', controls: true, playsinline: true, autoplay: true, muted: true }),
+          el('div', { class: 'live-player-empty', id: 'livePlayerEmpty' }, '选择右侧频道开始播放'),
+        ]),
+        el('div', { class: 'live-now' }, [
+          el('div', { class: 'live-now-title' }, [
+            el('h3', { id: 'liveChannelName' }, '未选择频道'),
+            el('span', { class: 'live-group-badge', id: 'liveGroupBadge' }, 'LIVE'),
+          ]),
+          el('p', { id: 'liveStatus' }, '频道加载后将自动尝试首条线路'),
+        ]),
+        el('div', { class: 'live-lines', id: 'liveLines' }),
+      ]),
+      el('aside', { class: 'live-channel-panel' }, [
+        el('div', { class: 'live-list-head' }, [el('h3', {}, '频道列表'), el('span', { id: 'liveCount' }, '加载中…')]),
+        el('div', { class: 'live-channel-list', id: 'liveChannelList' }),
+        el('div', { class: 'pager live-pager', id: 'livePager' }),
+      ]),
+    ]));
+    loadLiveGroups().then(loadLiveChannels).catch((error) => {
+      const meta = document.getElementById('liveMeta');
+      if (meta) meta.textContent = `直播清单采集失败：${error.message}`;
+      const host = document.getElementById('liveChannelList');
+      if (host) { clear(host); host.appendChild(banner('warn', `直播暂不可用：${error.message}`)); host.appendChild(el('button', { class: 'btn ghost', onclick: renderLive }, '重新采集')); }
+    });
+  }
+
   // ---- tvbox ----
   async function renderTvbox() {
     clear(app);
     app.appendChild(el('section', { class: 'hero' }, [
       el('h2', {}, 'TVBox 配置'),
-      el('p', {}, '将下方配置地址填入 TVBox / 影视仓等播放器的「配置地址」，即可加载「趣影」点播源。'),
+      el('p', {}, '将下方配置地址填入 TVBox / 影视仓等播放器的「配置地址」，即可加载「趣影」点播与直播源。'),
     ]));
     const panel = el('div', { class: 'panel' });
     app.appendChild(panel);
@@ -903,6 +1203,7 @@
     panel.appendChild(el('ul', { style: 'font-size:13px;color:var(--text-dim);line-height:1.9;padding-left:20px;margin:6px 0 0' }, [
       el('li', {}, '配置为 MacCMS 兼容源，接口为 '),
       el('li', {}, '支持分类筛选与二级分类、搜索、详情；播放地址由本站实时解析为短时有效的 m3u8。'),
+      el('li', {}, '配置同时包含「趣影直播」M3U，同名频道的多条线路会保留在直播中。'),
       el('li', {}, '播放源：详情中「趣影一线」为暴风源，「趣影二线」为 4K 源；详情页也可在 Web 端直接播放。'),
       el('li', {}, '如播放器无法加载，请确认配置地址可公网访问，且当前部署域名与 PUBLIC_URL 一致。'),
     ]));
@@ -922,7 +1223,7 @@
   // ---- docs ----
   function renderDocs() {
     clear(app);
-    app.appendChild(el('section', { class: 'hero' }, [el('h2', {}, 'API 文档'), el('p', {}, '趣影对外提供以下只读接口，均返回 JSON。')]));
+    app.appendChild(el('section', { class: 'hero' }, [el('h2', {}, 'API 文档'), el('p', {}, '趣影对外提供以下只读接口；除 /live.m3u 外均返回 JSON。')]));
     const rows = [
       ['GET', '/api/health', '本站健康检查', '—'],
       ['GET', '/api/vod/tvbox', 'TVBox 配置 JSON', '—'],
@@ -932,6 +1233,9 @@
       ['GET', '/api/vod/detail', '影片详情', 'ids（影片 ID）'],
       ['GET', '/api/vod/channels', '创意频道清单', '—'],
       ['GET/POST', '/api/vod/channel', '频道片源（候选池快照分页）', 'id（频道 ID）、pg；id=guess 时 POST {seeds, exclude}'],
+      ['GET', '/api/live/groups', '直播分组与采集源状态', '—'],
+      ['GET', '/api/live/channels', '直播频道与多线路', 'group、wd、pg、size（默认 60，最大 100）'],
+      ['GET', '/live.m3u', '合并直播 M3U 清单', '授权模式需 code'],
       ['GET', '/play.m3u8', '播放地址解析', 'id（影片 ID）、p（集序号，从 0 开始）'],
     ];
     const table = el('table', { class: 'docs' }, [
@@ -970,11 +1274,13 @@
 
   // ---- router ----
   function setView(v) {
+    if (state.view === 'live' && v !== 'live') stopLivePlayback();
     state.view = v;
     document.querySelectorAll('.nav-link').forEach((a) => a.classList.toggle('active', a.dataset.view === v));
     if (v === 'home') renderHome();
     else if (v === 'search') renderSearch();
     else if (v === 'channels') renderChannels();
+    else if (v === 'live') renderLive();
     else if (v === 'tvbox') renderTvbox();
     else if (v === 'docs') renderDocs();
   }
@@ -1034,7 +1340,7 @@
       site = { ...site, ...conf };
     } catch { /* 使用默认站点配置 */ }
     injectCardButton();
-    document.title = `${site.name} · 在线点播`;
+    document.title = `${site.name} · 影视直播`;
     const nameEl = document.querySelector('.brand-text h1');
     const subEl = document.querySelector('.brand-text .subtitle');
     if (nameEl) nameEl.textContent = site.name;
