@@ -7,16 +7,26 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export const LIVE_GROUP_NAMES = ['央视', '卫视', '地方', '体育', '影视', '少儿', '港澳台', '国际', '其他'];
 export const LIVE_EPG_URL = 'http://epg.51zmt.top:8000/e.xml';
+// 源顺序 = 线路优先级。前面的源先合并 → 频道的 lines[0] 来自可达率最高的源。
+// 可达率实测：fmml_itv 100% / o_s_cn 73% / epg.pw cn 未测但官方精选。
 export const DEFAULT_LIVE_SOURCES = [
-  { name: 'ZBDS', url: 'https://live.zbds.top/tv/iptv4.m3u' },
-  { name: 'iptv-org', url: 'https://iptv-org.github.io/iptv/index.m3u' },
-  { name: 'myIPTV', url: 'https://gh-proxy.org/raw.githubusercontent.com/suxuang/myIPTV/main/ipv4.m3u' },
+  // === 国内台主力（高质量，实测可达率 >= 70%） ===
+  { name: 'fmml_itv', url: 'https://m3u.ibert.me/fmml_itv.m3u', note: 'fanmingming/IPTV，中国移动官方 CDN，可达率 100%' },
+  { name: 'fmml_ipv6', url: 'https://m3u.ibert.me/fmml_ipv6.m3u', note: 'fanmingming/IPTV IPv6 线路，公网 IPv6 环境可达' },
+  { name: 'o_s_cn', url: 'https://m3u.ibert.me/o_s_cn.m3u', note: 'iptv.org 中国精选流，可达率 ~73%' },
+  { name: 'cn', url: 'https://m3u.ibert.me/cn.m3u', note: 'epg.pw 自动整理中国源' },
+  // === 原有兜底 ===
+  { name: 'iptv-org', url: 'https://iptv-org.github.io/iptv/index.m3u', note: '官方 GitHub Pages，国际台丰富但国内台大量死链' },
+  { name: 'ZBDS', url: 'https://live.zbds.top/tv/iptv4.m3u', note: '备用' },
+  { name: 'myIPTV', url: 'https://raw.githubusercontent.com/suxuang/myIPTV/main/ipv4.m3u', note: '原始 github 直链，不再走 gh-proxy.org' },
 ];
 
 // 已知完全不可用的源：vbskycn（gh-proxy.com 长期 403）、以及其它历史上连续挂掉的源。
 // 这些在 DEFAULT_LIVE_SOURCES 中直接移除，用户显式设置 LIVE_SOURCES 可以覆盖。
 export const DISABLED_LIVE_SOURCES = [
   { name: 'vbskycn', url: 'https://gh-proxy.com/raw.githubusercontent.com/vbskycn/iptv/refs/heads/master/tv/iptv4.m3u', reason: 'gh-proxy.com 镜像持续 403，清单完全不可达' },
+  { name: 'fmml_index', url: 'https://m3u.ibert.me/fmml_index.m3u', reason: '0/40 可达率，host 58.248.112.205 全死' },
+  { name: 'ycl_iptv', url: 'https://m3u.ibert.me/ycl_iptv.m3u', reason: '全是 RTSP/UDP 组播，公网不可用' },
 ];
 
 // 可选本地 assets/ 兜底：用户可在 dyrs-vod-web/assets/ 或 public/assets/ 放置 .m3u 文件，
