@@ -96,28 +96,36 @@ test('远端全挂时 assets/ 本地 m3u 自动兜底', async (t) => {
   assert.equal(typeof live.LiveCollector, 'function');
   const fs = await import('node:fs');
   const path = await import('node:path');
-  // 先清掉 assets/ 目录里的真文件，确保测试完全受控
+  // 先清掉 assets/ 与 public/assets/ 里的真文件，确保测试完全受控
   const localDir = path.join(import.meta.dirname, 'assets');
-  const existed = fs.existsSync(localDir);
-  const savedFiles = [];
-  if (existed) {
-    for (const f of fs.readdirSync(localDir)) {
-      const full = path.join(localDir, f);
-      savedFiles.push({ name: f, data: fs.readFileSync(full) });
+  const publicLocalDir = path.join(import.meta.dirname, 'public', 'assets');
+  const isolate = (dir) => {
+    const saved = [];
+    if (!fs.existsSync(dir)) return saved;
+    for (const f of fs.readdirSync(dir)) {
+      const full = path.join(dir, f);
+      saved.push({ name: f, data: fs.readFileSync(full) });
     }
-    fs.rmSync(localDir, { recursive: true });
-  }
+    fs.rmSync(dir, { recursive: true });
+    return saved;
+  };
+  const restore = (dir, saved) => {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+    for (const s of saved) {
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, s.name), s.data);
+      } catch {}
+    }
+  };
+  const savedFiles = isolate(localDir);
+  const savedPublicFiles = isolate(publicLocalDir);
   fs.mkdirSync(localDir, { recursive: true });
   fs.writeFileSync(path.join(localDir, 'iptv4.m3u'),
     '#EXTM3U\n#EXTINF:-1 group-title="央视",CCTV1\nhttps://local.example/cctv1.m3u8\n');
   t.after(() => {
-    try { fs.rmSync(localDir, { recursive: true, force: true }); } catch {}
-    for (const s of savedFiles) {
-      try {
-        fs.mkdirSync(localDir, { recursive: true });
-        fs.writeFileSync(path.join(localDir, s.name), s.data);
-      } catch {}
-    }
+    restore(localDir, savedFiles);
+    restore(publicLocalDir, savedPublicFiles);
   });
 
   const collector = new live.LiveCollector({
