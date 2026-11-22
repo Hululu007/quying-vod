@@ -282,16 +282,11 @@ export function mergeLiveChannels(entries) {
       channel.lines.push({ url, source: String(entry.source || '').trim() || '直播源' });
     }
   }
-  // HTTP 混合内容 + 源健康度淘汰：
-  // 1) 如果一个频道有多线路且含 HTTPS，优先只留 HTTPS（生产 HTTPS 页面 HTTP 会被浏览器拦）
-  // 2) 如果一个频道只剩 HTTP 线路，保留下但后端代理兜底（/live-proxy.m3u8）
+  // 不再在此处丢弃 HTTP 线路：
+  // 1) 前端 preferredLiveLine() 自动优先选 HTTPS
+  // 2) HTTP 线路自动通过 /live-proxy.m3u8 代理，不会触发 mixed content
+  // 所有源合并进 lines[]，客户端按顺序 fallback
   for (const channel of byName.values()) {
-    if (channel.lines.length > 1) {
-      const httpsLines = channel.lines.filter((l) => /^https:/i.test(l.url));
-      if (httpsLines.length > 0 && httpsLines.length < channel.lines.length) {
-        channel.lines = httpsLines;
-      }
-    }
     // 每个频道最多保留 5 条线路（避免合并过多垃圾备选）
     if (channel.lines.length > 5) channel.lines = channel.lines.slice(0, 5);
   }
