@@ -454,6 +454,83 @@ function upstreamFailure(message, { blocked = false } = {}) {
   return error;
 }
 
+// ---- Live-stream proxy helpers: serve HTTP live sources under our origin so HTTPS pages can play them ----
+function isPrivateHost(hostname) {
+  const h = String(hostname || '').toLowerCase().trim();
+  if (!h) return true;
+  if (/^(localhost|0\.0\.0\.0|broadcasthost|ip6-localhost|ip6-loopback|ip6-none|ip6-allnodes|ip6-allrouters)$/.test(h)) return true;
+  const ipv4 = h.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+  if (ipv4) {
+    const parts = ipv4[1].split('.').map(Number);
+    const [a, b] = parts;
+    if (a === 127 || a === 10) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 0) return true;
+  }
+  return false;
+}
+
+function liveUrlAllowed(raw) {
+  let parsed;
+  try { parsed = new URL(raw); } catch { return false; }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false;
+  // 测试/开发环境允许 localhost 与 127.0.0.1 以便本地联调代理端点
+  if (process.env.ALLOW_LOCAL_PROXY === '1') return true;
+  if (isPrivateHost(parsed.hostname)) return false;
+  return true;
+}
+
+function rewriteM3u8Segments(text, base, manifestUrl) {
+  const manifest = new URL(manifestUrl);
+  const proxySeg = (target) => `${base}/live-seg?url=${encodeURIComponent(target)}`;
+  return String(text || '').split(/\r?\n/).map((line) => {
+    const t = line.trim();
+    if (!t || t.startsWith('#')) return line;
+    if (/^https?:\/\//i.test(t)) return proxySeg(t);
+    if (t.startsWith('//')) return proxySeg(manifest.protocol + t);
+    try { return proxySeg(new URL(t, manifest).toString()); } catch { return line; }
+  }).join('\n');
+}
+
+function pipeUpstream(target, res, opts = {}) {
+  return new Promise((resolveRequest) => {
+    let settled = false;
+    const resolve = (value) => { if (!settled) { settled = true; resolveRequest(value); } };
+    let parsed;
+    try { parsed = new URL(target); } catch { res.writeHead(400); res.end('bad url'); resolve(); return; }
+    if ((parsed.protocol !== 'https:' && parsed.protocol !== 'http:') || isPrivateHost(parsed.hostname)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'forbidden host' }));
+      resolve(); return;
+    }
+    const lib = parsed.protocol === 'https:' ? https : http;
+    const headers = opts.headers || { 'User-Agent': UA, Accept: '*/*' };
+    const out = lib.get(parsed, { headers, timeout: opts.timeout || 15000 }, (up) => {
+      const status = up.statusCode || 0;
+      const ctype = String(up.headers['content-type'] || '');
+      if (status >= 300 && status < 400 && up.headers.location) {
+        res.writeHead(302, { Location: up.headers.location, 'Cache-Control': 'no-store' });
+        res.end(); up.resume(); resolve(); return;
+      }
+      if (status < 200 || status >= 400) {
+        res.writeHead(status, { 'Content-Type': ctype || 'text/plain' });
+        up.pipe(res); resolve(); return;
+      }
+      const outHeaders = {};
+      if (ctype) outHeaders['Content-Type'] = ctype;
+      if (up.headers['content-length']) outHeaders['Content-Length'] = up.headers['content-length'];
+      outHeaders['Cache-Control'] = 'public, max-age=60';
+      outHeaders['Access-Control-Allow-Origin'] = '*';
+      res.writeHead(status, outHeaders);
+      up.pipe(res); resolve();
+    });
+    out.on('error', () => { res.writeHead(502, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, error: 'upstream error' })); resolve(); });
+    out.on('timeout', () => { out.destroy(); });
+  });
+}
+
 const liveCollector = new LiveCollector({
   sources: LIVE_SOURCES,
   ttl: LIVE_CACHE_TTL_MS,
@@ -2526,6 +2603,36 @@ export async function requestHandler(req, res) {
       'Cache-Control': 'public, max-age=86400',
     });
     res.end(r.body);
+    return;
+  }
+
+  // Live-stream proxy: serve HTTP live m3u8 under our origin so HTTPS pages can play it.
+  if (p === '/live-proxy.m3u8' || p === '/live-seg') {
+    if (req.method !== 'GET') { sendJson(res, 405, { ok: false, error: 'method not allowed' }); return; }
+    const raw = url.searchParams.get('url') || '';
+    if (!liveUrlAllowed(raw)) { sendJson(res, 403, { ok: false, error: 'forbidden host' }); return; }
+    if (p === '/live-proxy.m3u8') {
+      const target = new URL(raw);
+      const r = await httpGetText(target.toString(), {
+        headers: { 'User-Agent': UA, Accept: 'application/x-mpegURL,*/*' },
+        timeout: LIVE_FETCH_TIMEOUT_MS,
+        deadline: Date.now() + LIVE_FETCH_TIMEOUT_MS,
+        followRedirects: true,
+      });
+      if (r.error || r.status < 200 || r.status >= 300) { sendJson(res, 502, { ok: false, error: 'manifest unavailable' }); return; }
+      let body = (r.body || Buffer.alloc(0)).toString('utf8');
+      if (!body.replace(/^\uFEFF/, '').trimStart().startsWith('#EXTM3U')) { sendJson(res, 400, { ok: false, error: 'not an m3u8' }); return; }
+      body = rewriteM3u8Segments(body, base, target.toString());
+      res.writeHead(200, {
+        'Content-Type': 'application/x-mpegURL; charset=utf-8',
+        'Content-Length': Buffer.byteLength(body),
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'public, max-age=30',
+      });
+      res.end(body);
+      return;
+    }
+    await pipeUpstream(raw, res, { timeout: 15000 });
     return;
   }
 

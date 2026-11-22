@@ -946,6 +946,14 @@
     }
   }
 
+  // HTTPS 页面上把 HTTP 直播清单包一层同源代理，避免浏览器混合内容拦截。
+  function liveProxy(origUrl) {
+    if (!origUrl) return '';
+    // m3u8 清单走代理改写分片 URL；非 m3u8 直连
+    if (/\.m3u8(?:[?#]|$)/i.test(origUrl)) return `/live-proxy.m3u8?url=${encodeURIComponent(origUrl)}`;
+    return origUrl;
+  }
+
   async function loadLiveLine(channel, index) {
     if (!channel || !channel.lines[index]) return;
     stopLivePlayback();
@@ -958,11 +966,10 @@
     if (!video) return;
     const empty = document.getElementById('livePlayerEmpty');
     if (empty) empty.classList.add('hidden');
-    liveStatus(`正在连接线路 ${index + 1} · ${line.source || '直播源'}…`);
-    if (location.protocol === 'https:' && line.url.startsWith('http:')) {
-      failLiveLine(channel, index, token, 'HTTPS 页面无法直连 HTTP 线路');
-      return;
-    }
+    const secure = location.protocol === 'https:';
+    const url = secure && line.url.startsWith('http:') ? liveProxy(line.url) : line.url;
+    const viaProxy = secure && line.url.startsWith('http:');
+    liveStatus(`正在连接线路 ${index + 1} · ${line.source || '直播源'}${viaProxy ? '（HTTPS 代理）' : ''}…`);
     liveState.watchdog = setTimeout(() => failLiveLine(channel, index, token, '连接超时'), 15000);
     video.onplaying = () => {
       if (token !== liveState.token) return;
@@ -976,7 +983,7 @@
     video.onerror = () => failLiveLine(channel, index, token, '播放失败');
 
     if (video.canPlayType('application/vnd.apple.mpegurl')) {
-      video.src = line.url;
+      video.src = url;
       video.play().catch(() => liveStatus('线路已加载，点击播放器开始播放'));
       return;
     }
@@ -1001,7 +1008,7 @@
       hls.on(Hls.Events.ERROR, (event, data) => {
         if (data && data.fatal) failLiveLine(channel, index, token, '直播流连接失败');
       });
-      hls.loadSource(line.url);
+      hls.loadSource(url);
       hls.attachMedia(video);
     } catch (error) {
       failLiveLine(channel, index, token, error.message || '播放器初始化失败');
