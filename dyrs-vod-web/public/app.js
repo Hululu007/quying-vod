@@ -958,7 +958,7 @@
       el('p', { style: 'font-size:13px;color:var(--text-dim);line-height:1.8' },
         '数据来自公开影视元数据接口，本站不存储影片文件。播放地址为短时有效的 m3u8，访问 /play.m3u8 时实时解析。'),
       el('p', { style: 'font-size:13px;color:var(--text-dim);line-height:1.8' },
-        '榜单参数：t=new 最新（按更新时间）、t=hot 最热（按点击量）、t=score 高分推荐（按评分），均可与 year 组合使用；它们也出现在 TVBox 的分类（class）中。'),
+        '榜单参数：t=new 最新（豆瓣新片榜）、t=hot 最热（豆瓣实时热门电影与剧集）、t=score 高分推荐（豆瓣电影 Top250），标题再按片名精确匹配本站可播片源，均可与 year 组合使用；它们也出现在 TVBox 的分类（class）中。'),
       el('p', { style: 'font-size:13px;color:var(--text-dim);line-height:1.8' },
         '播放源：详情 vod_play_from 中「趣影一线」为暴风源，「趣影二线」为 4K 源；4K 源可用时会自动按片名+年份匹配合并，vod_play_url 以 $$$ 与之一一对应。'),
       el('p', { style: 'font-size:13px;color:var(--text-dim);line-height:1.8' },

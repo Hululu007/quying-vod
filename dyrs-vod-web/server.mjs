@@ -1083,10 +1083,181 @@ function listCacheKey({ pg, t, year, withPlay } = {}) {
 const RANK_KINDS = new Set(['new', 'hot', 'score']);
 const RANK_SOURCE_PAGES = 6;
 
-// 最新/最热/高分推荐：上游不支持排序参数，取前几页本地排序后分页。
+// ---- 豆瓣榜单 ----：最新/最热/高分的候选与排序来自豆瓣，再按片名精确匹配本站可播片源。
+// 豆瓣不可用（被墙/风控/结构变化）时自动回退到上游排序。
+const DOUBAN_API_BASE = 'https://m.douban.com/rexxar/api/v2/subject_collection';
+const DOUBAN_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+const DOUBAN_REFERER = 'https://m.douban.com/movie/';
+// 最新 = 豆瓣新片榜；最热 = 实时热门电影 + 热门剧集；高分 = 豆瓣电影 Top250。
+const DOUBAN_COLLECTIONS = {
+  new: ['movie_latest'],
+  hot: ['movie_hot', 'tv_hot'],
+  score: ['movie_top250'],
+};
+const DOUBAN_CANDIDATE_LIMIT = 100; // 每个榜单最多取多少条豆瓣候选
+const DOUBAN_RESOLVE_LIMIT = 100;   // 最多为多少条候选做片名匹配
+const RANK_POOL_LIMIT = 80;         // 榜单池上限，决定可翻页的总条数
+
+// 直接向指定镜像发起一次搜索请求；镜像各自独立排队，并行匹配时可分摊压力。
+async function bfzySearchOnHost(host, wd) {
+  await hostSlot(host);
+  const qs = buildQuery({ ac: 'list', wd, pg: 1 });
+  const r = await httpGetText(`${host}/api.php/provide/vod/?${qs}`, {
+    headers: { 'User-Agent': UA, Accept: 'application/json,*/*', 'Accept-Encoding': 'identity', Referer: `${host}/` },
+    timeout: UPSTREAM_TIMEOUT_MS,
+  });
+  if (r.error || r.status < 200 || r.status >= 300) {
+    coolHost(host, UPSTREAM_COOLDOWN_MS);
+    return null;
+  }
+  let data;
+  try { data = JSON.parse(r.body.toString('utf8')); } catch { return null; }
+  return Array.isArray(data && data.list) ? data.list : [];
+}
+
+// 把待匹配的豆瓣标题分摊到各健康镜像上并行搜索，避免串行等满 400ms×N。
+async function searchTitlesOnHosts(candidates, out) {
+  const hosts = UPSTREAM_HOSTS.filter((h) => !hostCooling(h));
+  if (!hosts.length) return;
+  let cursor = 0;
+  await Promise.all(hosts.map(async (host) => {
+    while (true) {
+      const i = cursor;
+      cursor += 1;
+      if (i >= candidates.length) return;
+      const c = candidates[i];
+      const list = await bfzySearchOnHost(host, c.title).catch(() => null);
+      if (!list) continue;
+      const row = list.find((v) => titleKey(v && v.vod_name) === c.key) || null;
+      if (row) out.set(c.key, { row, year: c.year });
+    }
+  }));
+}
+
+async function fetchDoubanCollection(id, count) {
+  // 豆瓣接口单次最多返回 50 条，需要翻页才能拿满候选。
+  const target = Math.max(1, Number(count) || 1);
+  const items = [];
+  for (let start = 0; start < target; start += 50) {
+    const size = Math.min(50, target - start);
+    const url = `${DOUBAN_API_BASE}/${id}/items?start=${start}&count=${size}`;
+    const resp = await httpGetText(url, {
+      timeout: UPSTREAM_TIMEOUT_MS,
+      headers: {
+        'User-Agent': DOUBAN_UA,
+        Referer: DOUBAN_REFERER,
+        Accept: 'application/json, text/plain, */*',
+        'Accept-Encoding': 'identity',
+      },
+    });
+    if (resp.status < 200 || resp.status >= 300) throw new Error(`douban collection failed: ${resp.status}`);
+    let json;
+    try { json = JSON.parse(resp.body.toString('utf8')); } catch { throw new Error('douban invalid json'); }
+    const page = Array.isArray(json && json.subject_collection_items) ? json.subject_collection_items : [];
+    items.push(...page);
+    if (page.length < size) break;
+  }
+  return items
+    .map((it) => ({
+      title: normalizedTitle(it && it.title),
+      year: doubanItemYear(it),
+    }))
+    .filter((it) => it.title);
+}
+
+// Top250 等集合不返回 year 字段，需要从 card_subtitle 的「1994 / 美国 / …」里补。
+function doubanItemYear(item) {
+  const direct = String((item && item.year) || '').trim();
+  if (/^\d{4}$/.test(direct)) return direct;
+  const match = String((item && item.card_subtitle) || '').match(/^(\d{4})\b/);
+  return match ? match[1] : '';
+}
+
+function rankYearMatches(year, y) {
+  if (!y) return true;
+  const n = parseInt(String(year || ''), 10);
+  if (!Number.isFinite(n)) return false;
+  if (y === 'older') return n < 2020;
+  return String(n) === String(y);
+}
+
+async function fetchDoubanRankPool(kind, y) {
+  const ids = DOUBAN_COLLECTIONS[kind] || [];
+  const candidates = [];
+  const seen = new Set();
+  for (const id of ids) {
+    const list = await fetchDoubanCollection(id, DOUBAN_CANDIDATE_LIMIT).catch(() => []);
+    for (const item of list) {
+      if (!rankYearMatches(item.year, y)) continue;
+      const key = titleKey(item.title);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      candidates.push({ title: item.title, key, year: item.year });
+    }
+  }
+  if (!candidates.length) throw new Error('douban rank unavailable');
+
+  // 命中本地库的候选直接复用；其余按片名分摊到多个镜像并行搜索。
+  const matched = new Map();
+  const pending = [];
+  for (const c of candidates) {
+    let row = null;
+    try { row = await findLocalExactVod(c.title); } catch {}
+    if (row) matched.set(c.key, { row, year: c.year });
+    else pending.push(c);
+  }
+  await searchTitlesOnHosts(pending.slice(0, DOUBAN_RESOLVE_LIMIT), matched);
+
+  const rows = [];
+  const rowSeen = new Set();
+  for (const c of candidates) {
+    const entry = matched.get(c.key);
+    if (!entry) continue;
+    let row = entry.row;
+    // 上游精简列表可能缺年份，用豆瓣年份补齐，保证卡片展示完整。
+    if (!row.vod_year && entry.year) row = { ...row, vod_year: entry.year };
+    if (!rankYearMatches(row.vod_year, y)) continue;
+    const id = String(row.vod_id || '');
+    if (!id || rowSeen.has(id)) continue;
+    rowSeen.add(id);
+    rows.push(row);
+    if (rows.length >= RANK_POOL_LIMIT) break;
+  }
+  if (!rows.length) throw new Error('douban rank no playable match');
+  return rows;
+}
+
+// 最新/最热/高分推荐：优先使用豆瓣榜单，失败时回退上游排序。
+async function fetchRankedList(kind, pg, withPlay, year) {
+  const page = parsePage(pg);
+  const y = parseYear(year);
+  try {
+    // 快照必须是 { page, pagecount, total, list } 结构，才能被查询缓存正确存取。
+    const cached = await catalogQuery(`rank:douban:v2:${kind}:${y || ''}`, TTL.list, async () => {
+      const list = await fetchDoubanRankPool(kind, y);
+      return { page: 1, pagecount: 1, total: list.length, list };
+    });
+    const pool = cached && Array.isArray(cached.list) ? cached.list : [];
+    if (!pool.length) throw new Error('douban rank empty');
+    const start = (page - 1) * PAGE_SIZE;
+    const list = pool.slice(start, start + PAGE_SIZE).map((v) => ({ ...v }));
+    if (!withPlay) await hydrate(list);
+    return {
+      page,
+      pagecount: Math.max(1, Math.ceil(pool.length / PAGE_SIZE)),
+      total: pool.length,
+      list,
+    };
+  } catch (error) {
+    console.error('[rank] douban fallback:', (error && error.message) || error);
+    return fetchRankedListUpstream(kind, pg, withPlay, year);
+  }
+}
+
+// 上游排序回退：上游不支持排序参数，取前几页本地排序后分页。
 // 最新 = 上游默认 vod_time 倒序，直接透传分页；
 // 最热 = 按 vod_hits 排序（该字段只在 ac=detail 返回）；高分 = 按 vod_score 排序。
-async function fetchRankedList(kind, pg, withPlay, year) {
+async function fetchRankedListUpstream(kind, pg, withPlay, year) {
   const page = parsePage(pg);
   const y = parseYear(year);
   if (kind === 'new' && !y) {
@@ -1138,7 +1309,7 @@ async function fetchRankedList(kind, pg, withPlay, year) {
 async function fetchList({ pg, t, year, withPlay }) {
   const cat = categoryParam(t);
   if (cat && cat.kind === 'headline' && RANK_KINDS.has(cat.value)) {
-    const key = `rank:${cat.value}:v1:${withPlay ? 1 : 0}:${parsePage(pg)}:${PAGE_SIZE}:${parseYear(year)}`;
+    const key = `rank:${cat.value}:v3:${withPlay ? 1 : 0}:${parsePage(pg)}:${PAGE_SIZE}:${parseYear(year)}`;
     return catalogQuery(key, TTL.list, () => fetchRankedList(cat.value, pg, withPlay, year));
   }
   return catalogQuery(listCacheKey({ pg, t, year, withPlay }), TTL.list, () => fetchListLive({ pg, t, year, withPlay }));
