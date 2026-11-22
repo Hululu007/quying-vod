@@ -16,6 +16,8 @@ export const DEFAULT_LIVE_SOURCES = [
   { name: 'o_s_cn',     url: 'https://m3u.ibert.me/o_s_cn.m3u' },
   // vbskycn 直连 GitHub（不走 gh-proxy）：317 条，地方频道 177 条实测抽样全活，是地方台主力
   { name: 'vbskycn',    url: 'https://raw.githubusercontent.com/vbskycn/iptv/master/tv/iptv4.m3u' },
+  // Guovin/iptv-api 自动测速产物（gd 分支）：1616 条，CCTV 104 条抽样 71% 可达，且频道名为 CCTV-1/CCTV-2 这种干净格式，可合并补线路
+  { name: 'Guovin',     url: 'https://raw.githubusercontent.com/Guovin/iptv-api/gd/output/result.m3u' },
   // === iptv-org 分类精选（公网 CDN，可达率 40-80%，少儿/体育/电影/综艺/音乐/教育/纪录片） ===
   { name: 'iptv-org-kids',       url: 'https://iptv-org.github.io/iptv/categories/kids.m3u' },
   { name: 'iptv-org-sports',     url: 'https://iptv-org.github.io/iptv/categories/sports.m3u' },
