@@ -881,6 +881,9 @@
     hls: null, retryTimer: null, watchdog: null, token: 0, request: 0,
     health: new Map(), // channel.id → 首线路是否可用（会话内缓存，避免翻页重复探测）
   };
+  // 冷启动占位：服务端首次采集还没完成时会回 collecting，前端自动轮询，直到拿到真实数据。
+  let liveWarmTimer = null;
+  let liveWarmTries = 0;
   let hlsLoader = null;
 
   function liveStatus(text) {
@@ -1169,10 +1172,30 @@
 
   async function loadLiveGroups() {
     const data = await api(`/api/live/groups?t=${Date.now()}`);
+    const meta = document.getElementById('liveMeta');
+    if (data.collecting) {
+      // 服务端冷启动还在采源：先给提示，几秒后自动重试，避免用户看到 504 或空列表。
+      liveState.groups = [];
+      liveState.totalAll = 0;
+      renderLiveGroupTabs();
+      if (meta) meta.textContent = '直播源首次采集中，稍候自动重试…';
+      if (liveWarmTries < 10) {
+        liveWarmTries += 1;
+        clearTimeout(liveWarmTimer);
+        liveWarmTimer = setTimeout(() => {
+          loadLiveGroups().then(loadLiveChannels).catch(() => {});
+        }, 5000);
+      } else if (meta) {
+        meta.textContent = '直播源仍在采集中，请稍后手动刷新';
+      }
+      return;
+    }
+    liveWarmTries = 0;
+    clearTimeout(liveWarmTimer);
+    liveWarmTimer = null;
     liveState.groups = Array.isArray(data.groups) ? data.groups : [];
     liveState.totalAll = Number(data.total) || 0;
     renderLiveGroupTabs();
-    const meta = document.getElementById('liveMeta');
     if (meta) {
       const okSources = (data.sources || []).filter((source) => source.ok).length;
       const time = data.updatedAt ? new Date(data.updatedAt).toLocaleString('zh-CN', { hour12: false }) : '';
@@ -1192,6 +1215,11 @@
       if (liveState.wd) params.set('wd', liveState.wd);
       const data = await api(`/api/live/channels?${params}`);
       if (request !== liveState.request) return;
+      if (data.collecting) {
+        clear(host);
+        host.appendChild(spinner('直播源首次采集中，稍候自动加载…'));
+        return;
+      }
       liveState.channels = Array.isArray(data.list) ? data.list : [];
       liveState.total = Number(data.total) || 0;
       liveState.pg = Number(data.page) || 1;
@@ -1290,6 +1318,9 @@
         el('div', { class: 'pager live-pager', id: 'livePager' }),
       ]),
     ]));
+    liveWarmTries = 0;
+    clearTimeout(liveWarmTimer);
+    liveWarmTimer = null;
     loadLiveGroups().then(loadLiveChannels).catch((error) => {
       const meta = document.getElementById('liveMeta');
       if (meta) meta.textContent = `直播清单采集失败：${error.message}`;

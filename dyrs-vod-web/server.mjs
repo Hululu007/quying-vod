@@ -118,6 +118,11 @@ const TTL = {
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 const LIVE_FETCH_TIMEOUT_MS = Math.max(1000, Number(process.env.LIVE_FETCH_TIMEOUT_MS) || 20000);
 const LIVE_CACHE_TTL_MS = Math.max(0, Number(process.env.LIVE_CACHE_TTL_MS ?? '21600000') || 0);
+// 冷启动保护：进程刚起来、快照还没采完时，首个请求最多同步等待这么久；
+// 超时就先回 collecting 占位，把采集留在后台继续，避免整套采集撞上网关 30s 超时变成 504。
+const LIVE_COLD_WAIT_MS = Math.max(0, Number(process.env.LIVE_COLD_WAIT_MS ?? '8000') || 0);
+// 启动即预热直播快照（仅长驻进程，Vercel 每请求冷启动不适用）。
+const LIVE_WARMUP = process.env.LIVE_WARMUP !== '0';
 const LIVE_SOURCES = process.env.LIVE_SOURCES
   ? process.env.LIVE_SOURCES.split(',').map((url) => url.trim()).filter(Boolean).map((url, index) => ({ name: `自定义源${index + 1}`, url }))
   : DEFAULT_LIVE_SOURCES;
@@ -561,6 +566,27 @@ const liveCollector = new LiveCollector({
     return body;
   },
 });
+
+// 冷启动读快照：已有快照时照常返回（过期则由 LiveCollector 自行刷新）；
+// 完全没有快照时，最多等 LIVE_COLD_WAIT_MS，等不到就返回 null，让调用方回 collecting 占位。
+async function liveSnapshotOrNull() {
+  if (liveCollector.snapshot) return liveCollector.getSnapshot();
+  const pending = liveCollector.getSnapshot();
+  pending.catch(() => {}); // 超时先行返回时，后台失败不能变成 unhandledRejection
+  if (LIVE_COLD_WAIT_MS <= 0) return null;
+  let timer = null;
+  try {
+    return await Promise.race([
+      pending,
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(null), LIVE_COLD_WAIT_MS);
+        if (timer.unref) timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 async function upstreamJson(params, ttl) {
   const qs = buildQuery(params);
@@ -2542,9 +2568,33 @@ export async function requestHandler(req, res) {
   if (p === '/api/live/groups' || p === '/api/live/channels' || p === '/live.m3u') {
     let snapshot;
     try {
-      snapshot = await liveCollector.getSnapshot();
+      snapshot = await liveSnapshotOrNull();
     } catch (error) {
       sendJson(res, 502, { ok: false, error: String((error && error.message) || error) });
+      return;
+    }
+    // 冷启动首次采集未完成：立刻回占位（no-store，避免 CDN 缓存空结果），采集在后台继续，客户端稍后重试。
+    if (!snapshot) {
+      if (p === '/api/live/groups') {
+        res.setHeader('Retry-After', '10');
+        sendJson(res, 200, { ok: true, collecting: true, total: 0, updatedAt: null, stale: true, groups: [], sources: [] });
+        return;
+      }
+      if (p === '/api/live/channels') {
+        const size = Math.max(1, Math.min(100, Number.parseInt(url.searchParams.get('size'), 10) || 60));
+        res.setHeader('Retry-After', '10');
+        sendJson(res, 200, { ok: true, collecting: true, list: [], total: 0, page: 1, pagecount: 1, size, updatedAt: null, stale: true });
+        return;
+      }
+      const body = '#EXTM3U\n';
+      res.writeHead(200, {
+        'Content-Type': 'application/x-mpegURL; charset=utf-8',
+        'Content-Length': Buffer.byteLength(body),
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'no-store',
+        'Retry-After': '10',
+      });
+      res.end(body);
       return;
     }
     if (p === '/api/live/groups') {
@@ -2902,6 +2952,12 @@ if (!process.env.VERCEL) {
   server.listen(PORT, HOST, () => {
     console.log(`[quying] listening on http://${HOST}:${PORT}`);
   });
+  // 启动即预热直播快照：把十几秒的采集挪到后台，首个用户请求直接命中缓存而不是等采集。
+  if (LIVE_WARMUP) {
+    liveCollector.getSnapshot()
+      .then((snapshot) => console.log(`[quying] live snapshot warmed: ${snapshot.channels.length} channels`))
+      .catch((error) => console.warn('[quying] live warmup failed:', (error && error.message) || error));
+  }
 }
 
 // Vercel 要求入口模块的默认导出是函数或 server
