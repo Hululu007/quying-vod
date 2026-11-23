@@ -57,7 +57,19 @@ export async function initStores({ initialPassword, moduleDir } = {}) {
   }
 
   // ---- SQLite 降级 ----
-  const { CatalogStore, defaultDatabasePath } = await import('./catalog-store.mjs');
+  // Node 22+ 才有 node:sqlite；低版本运行时给出可操作的错误，而不是裸的模块缺失
+  let CatalogStore;
+  let defaultDatabasePath;
+  let AdminStore;
+  try {
+    ({ CatalogStore, defaultDatabasePath } = await import('./catalog-store.mjs'));
+    ({ AdminStore } = await import('./admin-store.mjs'));
+  } catch (error) {
+    if (String(error?.code || error?.message || '').includes('node:sqlite')) {
+      throw new Error('当前 Node 运行时不支持 node:sqlite：请配置 DATABASE_URL 使用 PostgreSQL，或设置 DISABLE_DB=1');
+    }
+    throw error;
+  }
   const preferred = process.env.VOD_DB_PATH
     ? path.resolve(process.env.VOD_DB_PATH)
     : defaultDatabasePath(moduleDir);
@@ -70,9 +82,7 @@ export async function initStores({ initialPassword, moduleDir } = {}) {
     databasePath = path.join(os.tmpdir(), 'quying', 'catalog.db');
   }
   const sqliteCatalog = new CatalogStore(databasePath);
-  let adminStore = null;
-  const { AdminStore } = await import('./admin-store.mjs');
-  adminStore = new AdminStore(databasePath, { initialPassword });
+  const adminStore = new AdminStore(databasePath, { initialPassword });
   return {
     catalogStore: wrapCatalogSync(sqliteCatalog),
     adminStore: wrapAdminSync(adminStore),
