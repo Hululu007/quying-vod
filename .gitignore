@@ -6,6 +6,9 @@ data/
 .tmp-*
 .tools/
 .trae/
+
+# 直播源探测中间产物（每次跑 tools/pick-live-sources.mjs 重新生成）
+dyrs-vod-web/assets/pick-live-report.json
 .DS_Store
 *.swp
 .git/*
