@@ -63,7 +63,7 @@ function readLocalLiveSources() {
       let text;
       try { text = fs.readFileSync(fullPath, 'utf8'); } catch { continue; }
       if (!text || !text.replace(/^\uFEFF/, '').trimStart().startsWith('#EXTM3U')) continue;
-      sources.push({ name: `本地-${path.basename(file.name, path.extname(file.name))}`, text });
+      sources.push({ name: `本地-${path.basename(file.name, path.extname(file.name))}`, text, always: /-live\.m3u$/i.test(file.name) });
     }
   }
   return sources;
@@ -380,8 +380,19 @@ export class LiveCollector {
   async collect() {
     const sources = [];
     const entries = [];
+    // 常驻本地补充源（文件名以 -live.m3u 结尾）：先于远端进入，使其线路排在 lines[0] 优先播放
+    if (!this.disableLocal) {
+      for (const src of readLocalLiveSources().filter((item) => item.always)) {
+        const rows = parseM3U(src.text, src.name);
+        if (rows.length) {
+          entries.push(...rows);
+          sources.push({ name: src.name, url: '(本地)', ok: true, count: rows.length, local: true });
+        }
+      }
+    }
     // 串行采集：源在 DEFAULT_LIVE_SOURCES 里的顺序 = 线路优先级
     // 先采到的源 → 频道的 lines[0]，后采到的追加到 lines[1+]
+    const remoteBase = entries.length;
     for (const source of this.sources) {
       try {
         const text = await this.fetchText(source.url);
@@ -420,11 +431,11 @@ export class LiveCollector {
         sources.push({ name: source.name, url: source.url, ok: false, count: 0, error: String((error && error.message) || error).trim() });
       }
     }
+    // 远端源全部为空时，才把剩余的本地兜底清单并进来
     let allRemoteDown = false;
-    if (!entries.length && !this.disableLocal) {
+    if (entries.length === remoteBase && !this.disableLocal) {
       allRemoteDown = true;
-      const local = readLocalLiveSources();
-      for (const src of local) {
+      for (const src of readLocalLiveSources().filter((item) => !item.always)) {
         const rows = parseM3U(src.text, src.name);
         if (rows.length) {
           entries.push(...rows);

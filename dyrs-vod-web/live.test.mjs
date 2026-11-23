@@ -69,6 +69,7 @@ test('采集器合并成功源并记录失败源', async () => {
   assert.equal(typeof live.LiveCollector, 'function');
   const collector = new live.LiveCollector({
     sources: [{ name: '好源', url: 'https://good.example/list.m3u' }, { name: '坏源', url: 'https://bad.example/list.m3u' }],
+    disableLocal: true,
     fetchText: async (url) => {
       if (url.includes('bad')) throw new Error('403 Forbidden');
       return '#EXTM3U\n#EXTINF:-1 group-title="央视",CCTV1\nhttps://live.example/cctv1.m3u8\n';

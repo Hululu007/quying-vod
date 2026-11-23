@@ -28,6 +28,7 @@ test('直播 API 返回分组、分页频道和 TVBox 直播配置', async (t) =
 
   process.env.DISABLE_DB = '1';
   process.env.VERCEL = '1';
+  process.env.LIVE_DISABLE_LOCAL = '1';
   process.env.LIVE_SOURCES = `http://127.0.0.1:${upstreamPort}/list.m3u`;
   const { requestHandler } = await import('./server.mjs');
   const app = http.createServer(requestHandler);
