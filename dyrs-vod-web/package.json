@@ -8,7 +8,9 @@
     "node": ">=20"
   },
   "scripts": {
-    "start": "node server.mjs"
+    "start": "node server.mjs",
+    "live:refresh": "node tools/refresh-live-sources.mjs",
+    "live:refresh:dry": "node tools/refresh-live-sources.mjs --dry-run"
   },
   "license": "MIT",
   "dependencies": {

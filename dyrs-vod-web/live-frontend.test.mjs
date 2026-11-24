@@ -42,3 +42,15 @@ test('直播错误分级恢复：网络错误重连、媒体错误 recover、卡
   assert.match(app, /seekable\.end/);
   assert.match(app, /capLevelToPlayerSize: true/);
 });
+
+test('线路健康分：成功加分、失败扣分并参与候选排序', () => {
+  assert.match(app, /qy-live-health/);
+  assert.match(app, /function noteLiveHealth/);
+  assert.match(app, /noteLiveHealth\(failed && failed\.url, false\)/);
+  assert.match(app, /noteLiveHealth\(line\.url, true\)/);
+  assert.match(app, /liveLineScore\(lines\[b\]\.url\) - liveLineScore\(lines\[a\]\.url\)/);
+});
+
+test('频道搜索输入防抖，避免逐字请求', () => {
+  assert.match(app, /setTimeout\(runLiveSearch, 300\)/);
+});

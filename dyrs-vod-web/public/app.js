@@ -878,7 +878,7 @@
   const liveState = {
     group: '', wd: '', pg: 1, size: 60, pagecount: 1, total: 0, totalAll: 0,
     groups: [], channels: [], current: null, lineIndex: 0,
-    hls: null, retryTimer: null, watchdog: null, videoCheck: null, stallTimer: null, hlsRetry: 0, token: 0, request: 0,
+    hls: null, retryTimer: null, watchdog: null, videoCheck: null, stallTimer: null, hlsRetry: 0, failNoted: false, token: 0, request: 0,
     health: new Map(), // channel.id → 首线路是否可用（会话内缓存，避免翻页重复探测）
   };
   // 冷启动占位：服务端首次采集还没完成时会回 collecting，前端自动轮询，直到拿到真实数据。
@@ -957,6 +957,11 @@
   function failLiveLine(channel, index, token, message) {
     if (token !== liveState.token || liveState.retryTimer) return;
     clearTimeout(liveState.watchdog);
+    if (!liveState.failNoted) {
+      liveState.failNoted = true;
+      const failed = channel.lines[index];
+      noteLiveHealth(failed && failed.url, false);
+    }
     const next = index + 1;
     if (next < channel.lines.length) {
       liveStatus(`${message}，即将切换线路 ${next + 1}…`);
@@ -995,6 +1000,7 @@
     liveState.current = channel;
     liveState.lineIndex = index;
     liveState.hlsRetry = 0;
+    liveState.failNoted = false;
     updateLiveActive();
     const line = channel.lines[index];
     const video = document.getElementById('liveVideo');
@@ -1010,6 +1016,7 @@
       if (token !== liveState.token) return;
       clearTimeout(liveState.watchdog);
       clearTimeout(liveState.stallTimer);
+      noteLiveHealth(line.url, true);
       liveStatus(`正在播放 · 线路 ${index + 1} · ${line.source || '直播源'}${video.muted ? '（默认静音，可手动取消）' : ''}`);
       watchLiveFrames(video, channel, index, token);
     };
@@ -1131,6 +1138,37 @@
     return firstHttps >= 0 ? firstHttps : 0;
   }
 
+  // ---- 线路健康分 ----
+  // 参考播放器「源站健康度」思路：成功 +1，失败 -2，10 分钟内失败过再扣 3 分。
+  // 结果存 localStorage（按设备生效，不写服务端，播放地址仍然不入库）；排序时健康线路优先，
+  // 避免每次都先撞已知坏线路，把重试机会留给可能可用的备选。
+  const LIVE_HEALTH_KEY = 'qy-live-health';
+  function readLiveHealth() {
+    try { return JSON.parse(localStorage.getItem(LIVE_HEALTH_KEY) || '{}') || {}; } catch { return {}; }
+  }
+  function noteLiveHealth(url, ok) {
+    if (!url) return;
+    const table = readLiveHealth();
+    const row = table[url] || { s: 0, f: 0, t: 0 };
+    if (ok) { row.s = Math.min((row.s || 0) + 1, 20); row.f = Math.max((row.f || 0) - 1, 0); }
+    else { row.f = Math.min((row.f || 0) + 1, 20); row.t = Date.now(); }
+    table[url] = row;
+    const urls = Object.keys(table);
+    if (urls.length > 400) {
+      urls.sort((a, b) => (table[a].t || 0) - (table[b].t || 0))
+        .slice(0, urls.length - 400)
+        .forEach((old) => { delete table[old]; });
+    }
+    try { localStorage.setItem(LIVE_HEALTH_KEY, JSON.stringify(table)); } catch { /* 隐私模式配额不足时忽略 */ }
+  }
+  function liveLineScore(url) {
+    const row = readLiveHealth()[url];
+    if (!row) return 0;
+    let score = (row.s || 0) - (row.f || 0) * 2;
+    if (row.f > 0 && Date.now() - (row.t || 0) < 10 * 60 * 1000) score -= 3;
+    return score;
+  }
+
   // 播放前探活：经同源代理拉清单头部，确认返回 #EXTM3U 才算可用。
   // 代理端点 http/https 上游都支持，顺带规避 CORS 与 HTTPS 混合内容拦截。
   async function probeLiveUrl(url, timeout = 4000) {
@@ -1148,13 +1186,17 @@
     }
   }
 
-  // 并行探测全部线路（最多 5 条，首选线路排最前），返回第一条可用的；全死返回 -1。
-  // 全量探测是为了避免"全线路已死"的频道逐条等 watchdog 超时（最长要等一分多钟）。
+  // 并行探测候选线路（最多 5 条），按历史健康分排序，HTTPS 线路在分数相同时优先，
+  // 返回第一条探测可用的；全死返回 -1。全量探测是为了避免"全线路已死"的频道逐条等 watchdog 超时。
   async function pickPlayableLine(channel, token) {
     const lines = channel.lines || [];
     if (!lines.length) return -1;
     const start = preferredLiveLine(channel);
-    const order = [start, ...lines.map((_, i) => i).filter((i) => i !== start)].slice(0, 5);
+    const order = lines
+      .map((_, i) => i)
+      .sort((a, b) => (liveLineScore(lines[b].url) - liveLineScore(lines[a].url))
+        || (a === start ? -1 : b === start ? 1 : a - b))
+      .slice(0, 5);
     liveStatus('正在检测可用线路…');
     const results = await Promise.all(order.map((i) => probeLiveUrl(lines[i].url, 5000)));
     if (token !== liveState.token) return -1;
@@ -1390,7 +1432,22 @@
     ]));
     const search = el('input', {
       type: 'search', id: 'liveSearchInput', placeholder: '搜索频道名…', value: liveState.wd,
-      onkeydown: (event) => { if (event.key === 'Enter') { liveState.wd = search.value.trim(); liveState.pg = 1; loadLiveChannels(); } },
+    });
+    // 输入防抖 300ms：清单有 4000+ 频道，每敲一个字都请求一次会白白打满服务端过滤。
+    let searchTimer = null;
+    const runLiveSearch = () => {
+      clearTimeout(searchTimer);
+      searchTimer = null;
+      liveState.wd = search.value.trim();
+      liveState.pg = 1;
+      loadLiveChannels();
+    };
+    search.addEventListener('input', () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(runLiveSearch, 300);
+    });
+    search.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') runLiveSearch();
     });
     app.appendChild(el('section', { class: 'cat-panel live-controls' }, [
       el('div', { class: 'live-group-bar', id: 'liveGroups' }),
