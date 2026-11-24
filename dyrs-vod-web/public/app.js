@@ -878,7 +878,7 @@
   const liveState = {
     group: '', wd: '', pg: 1, size: 60, pagecount: 1, total: 0, totalAll: 0,
     groups: [], channels: [], current: null, lineIndex: 0,
-    hls: null, retryTimer: null, watchdog: null, videoCheck: null, token: 0, request: 0,
+    hls: null, retryTimer: null, watchdog: null, videoCheck: null, stallTimer: null, hlsRetry: 0, token: 0, request: 0,
     health: new Map(), // channel.id → 首线路是否可用（会话内缓存，避免翻页重复探测）
   };
   // 冷启动占位：服务端首次采集还没完成时会回 collecting，前端自动轮询，直到拿到真实数据。
@@ -896,7 +896,10 @@
     clearTimeout(liveState.retryTimer);
     clearTimeout(liveState.watchdog);
     clearTimeout(liveState.videoCheck);
+    clearTimeout(liveState.stallTimer);
     liveState.videoCheck = null;
+    liveState.stallTimer = null;
+    liveState.hlsRetry = 0;
     liveState.retryTimer = null;
     liveState.watchdog = null;
     if (liveState.hls) {
@@ -991,6 +994,7 @@
     const token = liveState.token;
     liveState.current = channel;
     liveState.lineIndex = index;
+    liveState.hlsRetry = 0;
     updateLiveActive();
     const line = channel.lines[index];
     const video = document.getElementById('liveVideo');
@@ -1005,6 +1009,7 @@
     video.onplaying = () => {
       if (token !== liveState.token) return;
       clearTimeout(liveState.watchdog);
+      clearTimeout(liveState.stallTimer);
       liveStatus(`正在播放 · 线路 ${index + 1} · ${line.source || '直播源'}${video.muted ? '（默认静音，可手动取消）' : ''}`);
       watchLiveFrames(video, channel, index, token);
     };
@@ -1013,6 +1018,31 @@
       clearTimeout(liveState.watchdog);
     };
     video.onerror = () => failLiveLine(channel, index, token, '播放失败');
+
+    // 卡顿自愈：直播流抖动时先跳到直播边缘并重新拉流，10 秒仍无进展才换线路，
+    // 避免一有网络波动就整条线路重连（hls.js 官方推荐的 recover 思路）。
+    const armLiveStall = () => {
+      if (token !== liveState.token) return;
+      clearTimeout(liveState.stallTimer);
+      liveState.stallTimer = setTimeout(() => {
+        if (token !== liveState.token || liveState.lineIndex !== index) return;
+        if (video.paused || video.ended || video.readyState >= 3) return;
+        try {
+          const seekable = video.seekable;
+          if (seekable && seekable.length) video.currentTime = Math.max(seekable.end(seekable.length - 1), 0);
+        } catch { /* Safari 在极端情况下会抛 InvalidStateError，忽略 */ }
+        try { if (liveState.hls) liveState.hls.startLoad(); } catch { /* 已销毁时忽略 */ }
+        liveStatus(`线路 ${index + 1} 画面卡顿，正在恢复到直播最新位置…`);
+        clearTimeout(liveState.stallTimer);
+        liveState.stallTimer = setTimeout(() => {
+          if (token !== liveState.token || liveState.lineIndex !== index) return;
+          if (video.paused || video.readyState >= 2) return;
+          failLiveLine(channel, index, token, '画面长时间卡住');
+        }, 10000);
+      }, 10000);
+    };
+    video.onwaiting = armLiveStall;
+    video.onstalled = armLiveStall;
 
     if (video.canPlayType('application/vnd.apple.mpegurl')) {
       video.src = url;
@@ -1027,10 +1057,20 @@
         return;
       }
       const hls = new window.Hls({
+        // 参考 hls.js 官方配置建议：直播延迟以 3 个目标时长为准，最多容忍 10 个；
+        // 关掉低延迟模式（IPTV 不做 LL-HLS），缓冲上限控制内存，按播放器尺寸选档省带宽。
+        lowLatencyMode: false,
         liveSyncDurationCount: 3,
+        liveMaxLatencyDurationCount: 10,
+        maxBufferLength: 20,
+        backBufferLength: 30,
+        capLevelToPlayerSize: true,
         manifestLoadingTimeOut: 12000,
         levelLoadingTimeOut: 12000,
         fragLoadingTimeOut: 15000,
+        manifestLoadingMaxRetry: 2,
+        levelLoadingMaxRetry: 4,
+        fragLoadingMaxRetry: 6,
       });
       liveState.hls = hls;
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
@@ -1058,7 +1098,22 @@
         video.play().catch(() => liveStatus('线路已加载，点击播放器开始播放'));
       });
       hls.on(Hls.Events.ERROR, (event, data) => {
-        if (data && data.fatal) failLiveLine(channel, index, token, '直播流连接失败');
+        if (!data || !data.fatal || token !== liveState.token) return;
+        // 官方错误恢复策略：网络错误先 startLoad 重连、媒体错误先 recoverMediaError，
+        // 各给 2 次机会；仍失败才判定该线路不可用并切换，避免一次抖动就丢弃可用线路。
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR && liveState.hlsRetry < 2) {
+          liveState.hlsRetry += 1;
+          liveStatus(`线路 ${index + 1} 网络抖动，正在重连（第 ${liveState.hlsRetry} 次）…`);
+          hls.startLoad();
+          return;
+        }
+        if (data.type === Hls.ErrorTypes.MEDIA_ERROR && liveState.hlsRetry < 2) {
+          liveState.hlsRetry += 1;
+          liveStatus(`线路 ${index + 1} 解码异常，正在恢复…`);
+          hls.recoverMediaError();
+          return;
+        }
+        failLiveLine(channel, index, token, data.details === 'bufferAppendError' ? '该线路画面编码不受支持' : '直播流连接失败');
       });
       hls.loadSource(url);
       hls.attachMedia(video);

@@ -33,3 +33,12 @@ test('播放前按 CODECS 预检，H.265 等不可解码线路自动切换而不
   assert.match(app, /function watchLiveFrames/);
   assert.match(app, /只有声音没有画面/);
 });
+
+test('直播错误分级恢复：网络错误重连、媒体错误 recover、卡顿跳直播边缘', () => {
+  assert.match(app, /Hls\.ErrorTypes\.NETWORK_ERROR/);
+  assert.match(app, /hls\.startLoad\(\)/);
+  assert.match(app, /recoverMediaError/);
+  assert.match(app, /onwaiting = |onstalled = /);
+  assert.match(app, /seekable\.end/);
+  assert.match(app, /capLevelToPlayerSize: true/);
+});
