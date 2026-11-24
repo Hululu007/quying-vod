@@ -878,7 +878,7 @@
   const liveState = {
     group: '', wd: '', pg: 1, size: 60, pagecount: 1, total: 0, totalAll: 0,
     groups: [], channels: [], current: null, lineIndex: 0,
-    hls: null, retryTimer: null, watchdog: null, token: 0, request: 0,
+    hls: null, retryTimer: null, watchdog: null, videoCheck: null, token: 0, request: 0,
     health: new Map(), // channel.id → 首线路是否可用（会话内缓存，避免翻页重复探测）
   };
   // 冷启动占位：服务端首次采集还没完成时会回 collecting，前端自动轮询，直到拿到真实数据。
@@ -895,6 +895,8 @@
     liveState.token += 1;
     clearTimeout(liveState.retryTimer);
     clearTimeout(liveState.watchdog);
+    clearTimeout(liveState.videoCheck);
+    liveState.videoCheck = null;
     liveState.retryTimer = null;
     liveState.watchdog = null;
     if (liveState.hls) {
@@ -924,6 +926,20 @@
       document.head.appendChild(script);
     });
     return hlsLoader;
+  }
+
+  // 判断浏览器能否解码某个视频编码。IPTV 里常见 H.265/10bit H.264，浏览器只解出音轨时
+  // 表现为「有声音没画面」并卡在加载框，所以播放前先按 CODECS 预检。
+  function videoCodecSupported(codec) {
+    if (!codec || !window.MediaSource || typeof window.MediaSource.isTypeSupported !== 'function') return true;
+    try { return window.MediaSource.isTypeSupported(`video/mp4;codecs="${codec}"`); } catch { return true; }
+  }
+
+  function levelVideoCodec(level) {
+    const attrs = (level && level.attrs) || {};
+    const declared = String(attrs.CODECS || '').split(',').map((c) => c.trim())
+      .find((c) => /^(avc|hvc|hev|vp0?8|vp0?9|av01|mp4v)/i.test(c));
+    return String((level && level.videoCodec) || declared || '').toLowerCase();
   }
 
   function updateLiveActive() {
@@ -958,6 +974,17 @@
     return origUrl;
   }
 
+  // 「有声音没画面」兜底：清单没写 CODECS 时预检无从判断，播放 8 秒后仍拿不到视频尺寸
+  // （但数据已能正常播放）就判定视频轨不可解码，自动切下一条线路。
+  function watchLiveFrames(video, channel, index, token) {
+    clearTimeout(liveState.videoCheck);
+    liveState.videoCheck = setTimeout(() => {
+      if (token !== liveState.token || liveState.lineIndex !== index) return;
+      if (video.videoWidth > 0 || video.readyState < 2) return;
+      failLiveLine(channel, index, token, '只有声音没有画面（视频编码可能不被支持）');
+    }, 8000);
+  }
+
   async function loadLiveLine(channel, index) {
     if (!channel || !channel.lines[index]) return;
     stopLivePlayback();
@@ -979,6 +1006,7 @@
       if (token !== liveState.token) return;
       clearTimeout(liveState.watchdog);
       liveStatus(`正在播放 · 线路 ${index + 1} · ${line.source || '直播源'}${video.muted ? '（默认静音，可手动取消）' : ''}`);
+      watchLiveFrames(video, channel, index, token);
     };
     video.onloadedmetadata = () => {
       if (token !== liveState.token) return;
@@ -1007,6 +1035,26 @@
       liveState.hls = hls;
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
         if (token !== liveState.token) return;
+        // 按清单里的 CODECS 预检：解不了的视频编码（典型是 H.265）只会出声音，不会出画面。
+        // 整条线路都不支持就切下一条；混合编码则锁定到可解码的档位，避免 ABR 切过去又没画面。
+        const levels = Array.isArray(hls.levels) ? hls.levels : [];
+        const visual = levels
+          .map((level, levelIndex) => ({ level, levelIndex }))
+          .filter(({ level }) => levelVideoCodec(level) || (level.attrs && level.attrs.RESOLUTION));
+        if (levels.length && !visual.length) {
+          failLiveLine(channel, index, token, '该线路只有音频轨');
+          return;
+        }
+        const playable = visual.filter(({ level }) => videoCodecSupported(levelVideoCodec(level)));
+        if (visual.length && !playable.length) {
+          const codec = levelVideoCodec(visual[0].level);
+          failLiveLine(channel, index, token, /^(hvc|hev)/.test(codec) ? 'H.265 编码，当前浏览器不支持' : '视频编码当前浏览器不支持');
+          return;
+        }
+        if (playable.length < visual.length) {
+          hls.currentLevel = playable[0].levelIndex;
+          liveStatus(`已避开当前设备无法解码的编码，播放线路 ${index + 1}`);
+        }
         video.play().catch(() => liveStatus('线路已加载，点击播放器开始播放'));
       });
       hls.on(Hls.Events.ERROR, (event, data) => {
