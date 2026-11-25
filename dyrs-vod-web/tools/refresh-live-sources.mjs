@@ -104,6 +104,10 @@ async function main() {
   for (const file of files) {
     const full = path.join(ASSETS_DIR, file);
     const playlist = parseLivePlaylist(await readFile(full, 'utf8'));
+    // 生产环境仅 IPv4 出网，IPv6 条目直接剔除，不浪费探测配额
+    const beforeCount = playlist.entries.length;
+    playlist.entries = playlist.entries.filter((entry) => !/\[[0-9a-fA-F:]+\]/.test(entry.url));
+    const v6Dropped = beforeCount - playlist.entries.length;
     if (!playlist.entries.length) {
       console.log(`\n[${file}] 无有效条目，跳过`);
       continue;
@@ -112,10 +116,11 @@ async function main() {
     const alive = await probeAll(playlist.entries, { timeout, retries, concurrency });
     const kept = playlist.entries.filter((_, i) => alive[i]);
     const dropped = playlist.entries.filter((_, i) => !alive[i]);
-    totalDropped += dropped.length;
-    console.log(`  可达 ${kept.length} / ${playlist.entries.length}${dropped.length ? `，剔除 ${dropped.length} 条` : ''}`);
+    totalDropped += dropped.length + v6Dropped;
+    if (v6Dropped) console.log(`  IPv6 条目先剔除 ${v6Dropped} 条`);
+    console.log(`  可达 ${kept.length} / ${playlist.entries.length}${dropped.length ? `，探测剔除 ${dropped.length} 条` : ''}`);
     for (const entry of dropped) console.log(`  - 剔除 ${entry.name || '(未命名)'} ${entry.url}`);
-    if (!dropped.length) continue;
+    if (!dropped.length && !v6Dropped) continue;
     if (dryRun) { console.log('  --dry-run：不写文件'); continue; }
     await writeFile(full, serializeLivePlaylist({ head: playlist.head, entries: kept }), 'utf8');
     console.log('  已重写清单');

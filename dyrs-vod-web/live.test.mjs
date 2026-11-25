@@ -18,6 +18,24 @@ test('解析 EXTINF 属性、频道名和 URL，并跳过不支持的协议', ()
   });
 });
 
+test('IPv6 媒体地址在解析层丢弃（生产环境仅 IPv4 出网）', () => {
+  const rows = live.parseM3U(
+    '#EXTM3U\n'
+    + '#EXTINF:-1 group-title="地方",IPv6 台\nhttp://[2001:db8::1]:8080/live/index.m3u8\n'
+    + '#EXTINF:-1 group-title="卫视",IPv4 台\nhttps://198.51.100.9/live/index.m3u8\n',
+  );
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].name, 'IPv4 台');
+});
+
+test('默认源清单包含 yonsm 公网精选与 Guovin 测速产物', () => {
+  const urls = live.DEFAULT_LIVE_SOURCES.map((s) => s.url);
+  assert.ok(urls.includes('https://yonsm.github.io/IPTV/online/gwjx.m3u8'));
+  assert.ok(urls.some((u) => u.includes('Guovin/iptv-api')));
+  // 已实测淘汰的源不得回流
+  for (const bad of live.DISABLED_LIVE_SOURCES) assert.ok(!urls.includes(bad.url));
+});
+
 test('解析逗号属性值与未加引号的 group-title', () => {
   assert.equal(typeof live.parseM3U, 'function');
   const rows = live.parseM3U(`#EXTM3U\n#EXTINF:-1 tvg-name="Channel, One" group-title=Sports,Channel, One\nhttp://live.example/one.m3u8\n`);
@@ -25,7 +43,6 @@ test('解析逗号属性值与未加引号的 group-title', () => {
   assert.equal(rows[0].rawGroup, 'Sports');
   assert.equal(rows[0].group, '体育');
 });
-
 test('同名频道按规范化名称合并并保留不同线路', () => {
   assert.equal(typeof live.mergeLiveChannels, 'function');
   const channels = live.mergeLiveChannels([

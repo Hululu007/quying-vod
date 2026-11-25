@@ -6,6 +6,7 @@ import https from 'node:https';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_LIVE_SOURCES, LIVE_EPG_URL, LIVE_GROUP_NAMES, LiveCollector, buildLiveM3U, queryLiveChannels } from './live.mjs';
 
@@ -172,14 +173,30 @@ const MIME = {
 };
 
 function sendJson(res, status, data) {
-  const body = JSON.stringify(data);
-  res.writeHead(status, {
+  const body = Buffer.from(JSON.stringify(data));
+  writeBody(res, status, {
     'Content-Type': 'application/json; charset=utf-8',
-    'Content-Length': Buffer.byteLength(body),
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, OPTIONS',
     'Cache-Control': 'no-store',
-  });
+  }, body);
+}
+
+// 文本类响应按 Accept-Encoding 开 gzip：app.js 77KB 压到约 18KB，
+// 直接降低 traesite 每日 10GiB 出网限额的消耗；二进制（图片/字体/媒体分片）不压。
+const COMPRESSIBLE_TYPE_RE = /^text\/|json|javascript|svg\+xml|xml|mpegurl/i;
+function writeBody(res, status, headers, body) {
+  const req = res.req;
+  const type = String(headers['Content-Type'] || '');
+  const acceptsGzip = !!req && /\bgzip\b/.test(String(req.headers['accept-encoding'] || ''));
+  const base = { ...headers, Vary: 'Accept-Encoding' };
+  if (acceptsGzip && COMPRESSIBLE_TYPE_RE.test(type)) {
+    const gz = zlib.gzipSync(body, { level: 6 });
+    res.writeHead(status, { ...base, 'Content-Encoding': 'gzip', 'Content-Length': gz.length });
+    res.end(gz);
+    return;
+  }
+  res.writeHead(status, { ...base, 'Content-Length': body.length });
   res.end(body);
 }
 
@@ -190,10 +207,9 @@ function sendJsonCacheable(res, status, data, { maxAge = 30, sMaxAge = 300, stal
     sMaxAge = Math.min(sMaxAge, 60);
     stale = Math.min(stale, 120);
   }
-  const body = JSON.stringify(data);
-  res.writeHead(status, {
+  const body = Buffer.from(JSON.stringify(data));
+  writeBody(res, status, {
     'Content-Type': 'application/json; charset=utf-8',
-    'Content-Length': Buffer.byteLength(body),
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, OPTIONS',
     'Cache-Control': `public, max-age=${maxAge}, s-maxage=${sMaxAge}, stale-while-revalidate=${stale}`,
@@ -201,8 +217,7 @@ function sendJsonCacheable(res, status, data, { maxAge = 30, sMaxAge = 300, stal
     // 导致下游 Cloudflare 看不到缓存指令（cf-cache-status 一直是 DYNAMIC）。
     // 用 Cloudflare 专用头让 CF 边缘也缓存，且不影响浏览器与 Vercel 自身缓存。
     'Cloudflare-CDN-Cache-Control': `max-age=${sMaxAge}, stale-while-revalidate=${stale}`,
-  });
-  res.end(body);
+  }, body);
 }
 
 // Public base URL for client-facing links. The upstream origin never leaks.
@@ -1903,12 +1918,10 @@ function serveFile(res, filePath, versioned = false) {
     if (ext === '.html') cache = 'no-cache'; // 入口 HTML 始终轻量校验，保证新版本即时生效
     else if (versioned) cache = 'public, max-age=31536000, immutable'; // 带 ?v= 的版本化资源由边缘 CDN 长期缓存
     else cache = 'public, max-age=86400';
-    res.writeHead(200, {
+    writeBody(res, 200, {
       'Content-Type': MIME[ext] || 'application/octet-stream',
       'Cache-Control': cache,
-      'Content-Length': data.length,
-    });
-    res.end(data);
+    }, data);
   });
 }
 
@@ -2465,14 +2478,12 @@ async function handleAdmin(req, res, p, url) {
           card.usedAt ? new Date(card.usedAt).toISOString() : '',
         ].map(csvCell).join(','));
       }
-      const body = '\uFEFF' + rows.join('\r\n');
-      res.writeHead(200, {
+      const body = Buffer.from('\uFEFF' + rows.join('\r\n'), 'utf8');
+      writeBody(res, 200, {
         'Content-Type': 'text/csv; charset=utf-8',
         'Content-Disposition': 'attachment; filename="card-keys.csv"',
-        'Content-Length': Buffer.byteLength(body),
         'Cache-Control': 'no-store',
-      });
-      res.end(body);
+      }, body);
       return;
     }
     const cardMatch = p.match(/^\/api\/admin\/cards\/(\d+)$/);
@@ -2586,15 +2597,12 @@ export async function requestHandler(req, res) {
         sendJson(res, 200, { ok: true, collecting: true, list: [], total: 0, page: 1, pagecount: 1, size, updatedAt: null, stale: true });
         return;
       }
-      const body = '#EXTM3U\n';
-      res.writeHead(200, {
+      writeBody(res, 200, {
         'Content-Type': 'application/x-mpegURL; charset=utf-8',
-        'Content-Length': Buffer.byteLength(body),
         'Access-Control-Allow-Origin': '*',
         'Cache-Control': 'no-store',
         'Retry-After': '10',
-      });
-      res.end(body);
+      }, Buffer.from('#EXTM3U\n'));
       return;
     }
     if (p === '/api/live/groups') {
@@ -2621,16 +2629,14 @@ export async function requestHandler(req, res) {
       sendJson(res, 200, { ok: true, ...result, updatedAt: snapshot.updatedAt, stale: snapshot.stale });
       return;
     }
-    const body = buildLiveM3U(snapshot.channels);
+    const body = Buffer.from(buildLiveM3U(snapshot.channels));
     const edgeAge = REQUIRE_CARD ? 60 : 3600;
-    res.writeHead(200, {
+    writeBody(res, 200, {
       'Content-Type': 'application/x-mpegURL; charset=utf-8',
-      'Content-Length': Buffer.byteLength(body),
       'Access-Control-Allow-Origin': '*',
       'Cache-Control': `public, max-age=60, s-maxage=${edgeAge}, stale-while-revalidate=300`,
       'Cloudflare-CDN-Cache-Control': `max-age=${edgeAge}, stale-while-revalidate=300`,
-    });
-    res.end(body);
+    }, body);
     return;
   }
 
@@ -2681,13 +2687,11 @@ export async function requestHandler(req, res) {
       let body = (r.body || Buffer.alloc(0)).toString('utf8');
       if (!body.replace(/^\uFEFF/, '').trimStart().startsWith('#EXTM3U')) { sendJson(res, 400, { ok: false, error: 'not an m3u8' }); return; }
       body = rewriteM3u8Segments(body, base, target.toString());
-      res.writeHead(200, {
+      writeBody(res, 200, {
         'Content-Type': 'application/x-mpegURL; charset=utf-8',
-        'Content-Length': Buffer.byteLength(body),
         'Access-Control-Allow-Origin': '*',
         'Cache-Control': 'public, max-age=30',
-      });
-      res.end(body);
+      }, Buffer.from(body));
       return;
     }
     await pipeUpstream(raw, res, { timeout: 15000 });

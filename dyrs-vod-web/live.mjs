@@ -16,6 +16,11 @@ export const DEFAULT_LIVE_SOURCES = [
   { name: 'o_s_cn',     url: 'https://m3u.ibert.me/o_s_cn.m3u' },
   // vbskycn 直连 GitHub（不走 gh-proxy）：317 条，地方频道 177 条实测抽样全活，是地方台主力
   { name: 'vbskycn',    url: 'https://raw.githubusercontent.com/vbskycn/iptv/master/tv/iptv4.m3u' },
+  // yonsm 公网精选：217 条全 IPv4、标准中文名，经播放链路抽样 6/8 可达，补央视/卫视
+  { name: 'yonsm-gwjx', url: 'https://yonsm.github.io/IPTV/online/gwjx.m3u8' },
+  // Guovin/iptv-api 每日自动测速产物（gd 分支）：1600+ 条，地方台覆盖最强；
+  // 海外播放链路抽样约 23% 可达，命中线路延迟普遍 <700ms，死线由前端探活/健康分自动沉底
+  { name: 'guovin-gd',  url: 'https://raw.githubusercontent.com/Guovin/iptv-api/gd/output/result.m3u' },
   // === iptv-org 分类精选（公网 CDN，可达率 40-80%，少儿/体育/电影/综艺/音乐/教育/纪录片） ===
   { name: 'iptv-org-kids',       url: 'https://iptv-org.github.io/iptv/categories/kids.m3u' },
   { name: 'iptv-org-sports',     url: 'https://iptv-org.github.io/iptv/categories/sports.m3u' },
@@ -39,6 +44,11 @@ export const DISABLED_LIVE_SOURCES = [
   { name: 'fmml_ipv6', url: 'https://m3u.ibert.me/fmml_ipv6.m3u', reason: '清单内全是 IPv6 分片地址，Vercel/Cloudflare IPv4-only 生产环境不可达（ENETUNREACH）' },
   { name: 'cn', url: 'https://m3u.ibert.me/cn.m3u', reason: '死链比例过高（stream1.freetv.fun 多次全死），采集耗时大于收益' },
   { name: 'myIPTV', url: 'https://raw.githubusercontent.com/suxuang/myIPTV/main/ipv4.m3u', reason: '1201 条中大量死链，收益低于采集耗时' },
+  { name: 'YueChan-Live', url: 'https://raw.githubusercontent.com/YueChan/Live/main/IPTV.m3u', reason: '2026-11 经播放链路抽样 0/12 可达（96 条央视/卫视全死）' },
+  { name: 'YanG-Gather', url: 'https://raw.githubusercontent.com/YanG-1989/m3u/main/Gather.m3u', reason: '2026-11 抽样 0/12 可达，且内容以咪咕移动/游戏直播/影视轮播为主，非标电视频道' },
+  { name: 'Kimentanm-aptv', url: 'https://raw.githubusercontent.com/Kimentanm/aptv/master/m3u/iptv.m3u', reason: '2026-11 抽样仅 1/12 可达，且 120 条中 44 条是历年春晚点播，非直播' },
+  { name: 'yonsm-dsjx', url: 'https://yonsm.github.io/IPTV/online/dsjx.m3u8', reason: '2026-11 经播放链路抽样 0/8 可达' },
+  { name: 'yonsm-zbdq', url: 'https://yonsm.github.io/IPTV/online/zbdq.m3u8', reason: '2026-11 经播放链路抽样 0/8 可达' },
 ];
 
 // 可选本地 assets/ 兜底：用户可在 dyrs-vod-web/assets/ 或 public/assets/ 放置 .m3u 文件，
@@ -114,6 +124,9 @@ function httpUrl(value, { media = false } = {}) {
   try {
     const url = new URL(raw);
     if (url.protocol !== 'https:' && url.protocol !== 'http:') return '';
+    // 生产环境（Vercel / FunctionWeb）只有 IPv4 出网，IPv6 组播/单播必然 ENETUNREACH，
+    // 在解析层直接丢弃，避免污染频道线路池（如 Guovin 清单里约 4% 的 IPv6 条目）。
+    if (media && /^\[.*\]$/.test(url.hostname)) return '';
     if (media && /\.flv$/i.test(url.pathname)) return '';
     return url.toString();
   } catch {

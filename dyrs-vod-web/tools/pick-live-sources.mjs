@@ -22,15 +22,22 @@ const CONCURRENCY = Number(process.env.CONCURRENCY || 16);
 const VIA = (process.argv.find((a) => a.startsWith('--via=')) || '').slice(6).replace(/\/$/, '');
 const GROUP_FILTER = (process.env.GROUPS || '').trim(); // 'weishi' / 'defang' / '' 全部
 
-// 与 live-reachability-probe.mjs 保持一致的源列表
+// 与 live.mjs DEFAULT_LIVE_SOURCES 保持一致的候选源。
+// 注意：本机网络常无法直连 raw.githubusercontent.com，GitHub 仓库统一走 jsDelivr CDN
+// （内容与 raw 完全一致）；线上服务端在海外，live.mjs 仍使用 raw 直连。
 const SOURCES = [
   'https://m3u.ibert.me/o_s_cn.m3u',
   'https://m3u.ibert.me/fmml_itv.m3u',
-  'https://raw.githubusercontent.com/vbskycn/iptv/master/tv/iptv4.m3u',
+  'https://cdn.jsdelivr.net/gh/vbskycn/iptv@master/tv/iptv4.m3u',
+  'https://yonsm.github.io/IPTV/online/gwjx.m3u8',
+  'https://cdn.jsdelivr.net/gh/Guovin/iptv-api@gd/output/result.m3u',
   'https://live.zbds.top/tv/iptv4.m3u',
   'https://iptv-org.github.io/iptv/countries/cn.m3u',
 ];
 
+// 单响应体积上限：合法 m3u8 清单/分片探针都在 MB 级以内。
+// 曾遇到上游持续吐海量数据撑爆字符串上限（ERR_STRING_TOO_LONG）导致整轮探测崩溃，必须主动截断。
+const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 function requestOnce(url, { timeout = 15000, headers = {} } = {}) {
   return new Promise((resolve, reject) => {
     let u;
@@ -48,12 +55,21 @@ function requestOnce(url, { timeout = 15000, headers = {} } = {}) {
         return resolve({ redirect: new URL(res.headers.location, u).toString() });
       }
       const chunks = [];
-      res.on('data', (d) => chunks.push(Buffer.from(d)));
+      let size = 0;
+      res.on('data', (d) => {
+        size += d.length;
+        if (size > MAX_RESPONSE_BYTES) {
+          req.destroy(new Error('response too large'));
+          return;
+        }
+        chunks.push(Buffer.from(d));
+      });
       res.on('end', () => resolve({
         status: res.statusCode,
         headers: res.headers,
         body: Buffer.concat(chunks).toString('utf8'),
       }));
+      res.on('error', reject);
     });
     req.on('error', reject);
     req.setTimeout(timeout, () => req.destroy(new Error('timeout')));
@@ -69,6 +85,24 @@ async function fetchFollow(url, { timeout = 15000, maxRedirects = 4, headers = {
     return res;
   }
   throw new Error('too many redirects');
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// 清单源价值高、数量少，网络抖动时单次超时不应让整源缺席：最多 3 次尝试，退避 1.5s/3s
+async function fetchListWithRetry(url, attempts = 3) {
+  let lastError;
+  for (let i = 1; i <= attempts; i += 1) {
+    try {
+      const res = await fetchFollow(url, { timeout: 25000 });
+      if (res.status >= 200 && res.status < 300 && res.body) return res;
+      throw new Error(`HTTP ${res.status}`);
+    } catch (e) {
+      lastError = e;
+      if (i < attempts) await sleep(1500 * i);
+    }
+  }
+  throw lastError;
 }
 
 async function probeDirect(rawUrl) {
@@ -191,7 +225,7 @@ async function main() {
   const allRows = [];
   for (const src of SOURCES) {
     try {
-      const res = await fetchFollow(src, { timeout: 25000 });
+      const res = await fetchListWithRetry(src);
       const rows = parseM3U(res.body || '');
       rows.forEach((r) => allRows.push({ ...r, src }));
       console.log(`  OK  ${src.split('/').slice(-2).join('/').padEnd(30)} ${rows.length} 条`);
@@ -231,6 +265,14 @@ async function main() {
     const out = []; // { name, url }
     let done = 0;
     const total = g.list.length;
+    const fname = `${g.key === 'weishi' ? 'weishi' : 'defang'}-live.m3u`;
+    const fpath = path.join(outDir, fname);
+    // 检查点：每完成 25 个频道就落盘一次，防止后期异常（如上游超大响应/进程被杀）丢掉整轮成果
+    const writeCheckpoint = () => {
+      const m3u = ['#EXTM3U'];
+      for (const o of out) m3u.push(m3uLine(o.name, o.url, g.label));
+      fs.writeFileSync(fpath, m3u.join('\n') + '\n', 'utf8');
+    };
     await pool(g.list, CONCURRENCY, async (ch) => {
       let found = false;
       for (const url of ch.urls) {
@@ -241,17 +283,14 @@ async function main() {
       if (done % 50 === 0 || done === total) {
         console.log(`  进度 ${done}/${total} ... 已达 ${out.length} 条`);
       }
+      if (done % 25 === 0) writeCheckpoint();
       return found;
     });
     console.log(`  可达 ${out.length}/${total}`);
     for (const o of out) console.log(`    OK  ${o.name.padEnd(16)} ${o.url}`);
 
-    // 立即写 M3U + 累计 JSON 报告
-    const m3u = ['#EXTM3U'];
-    for (const o of out) m3u.push(m3uLine(o.name, o.url, g.label));
-    const fname = `${g.key === 'weishi' ? 'weishi' : 'defang'}-live.m3u`;
-    const fpath = path.join(outDir, fname);
-    fs.writeFileSync(fpath, m3u.join('\n') + '\n', 'utf8');
+    // 最终写 M3U + 累计 JSON 报告
+    writeCheckpoint();
     console.log(`  ✓ 已写入 ${fpath}`);
 
     report.groups[g.key] = { label: g.label, sampled: total, playable: out.length, entries: out };

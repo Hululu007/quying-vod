@@ -7,9 +7,12 @@ test('解析与重写保留精选清单的结构和顺序', async () => {
   const text = await readFile(new URL('./assets/weishi-live.m3u', import.meta.url), 'utf8');
   const parsed = parseLivePlaylist(text);
   assert.equal(parsed.head[0], '#EXTM3U');
-  assert.ok(parsed.entries.length > 5);
-  assert.equal(parsed.entries[0].name, '新疆卫视');
-  assert.match(parsed.entries[0].url, /^https?:/);
+  assert.ok(parsed.entries.length > 10);
+  for (const entry of parsed.entries) {
+    assert.match(entry.url, /^https?:/);
+    assert.ok(entry.name.length > 0);
+    assert.doesNotMatch(entry.url, /\[[0-9a-fA-F:]+\]/, '精选清单不得包含 IPv6 线路');
+  }
   const round = parseLivePlaylist(serializeLivePlaylist(parsed));
   assert.deepEqual(round.entries.map((entry) => entry.url), parsed.entries.map((entry) => entry.url));
 });
