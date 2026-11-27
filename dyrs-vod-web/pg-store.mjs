@@ -4,6 +4,7 @@
 // 实现后台设置、广告、卡密、会话与目录缓存的跨实例/跨重启持久化。
 import crypto from 'node:crypto';
 import pg from 'pg';
+import { hashPassword, verifyPassword } from './password.mjs';
 
 // pg 默认把 BIGINT 解析成字符串；这里的时间戳都是 epoch 毫秒（安全整数范围内），
 // 转成 number 以保持与 MySQL / SQLite 后端一致的返回类型。
@@ -110,20 +111,6 @@ function assessCard(row, nowMs) {
     fresh: row.used_at == null,
   };
 }
-function hashPassword(password) {
-  // 与 admin-store.mjs 保持同格式：scrypt$salt$hash，避免迁移后旧密码失效。
-  const salt = crypto.randomBytes(16).toString('hex');
-  const hash = crypto.scryptSync(String(password), salt, 64).toString('hex');
-  return `scrypt$${salt}$${hash}`;
-}
-function verifyPassword(password, stored) {
-  const parts = String(stored || '').split('$');
-  if (parts.length !== 3 || parts[0] !== 'scrypt') return false;
-  const [, salt, hash] = parts;
-  const expected = Buffer.from(hash, 'hex');
-  const candidate = crypto.scryptSync(String(password), salt, 64);
-  return candidate.length === expected.length && crypto.timingSafeEqual(candidate, expected);
-}
 function tokenHash(token) {
   return crypto.createHash('sha256').update(String(token)).digest('hex');
 }
@@ -197,16 +184,16 @@ const SCHEMA = [
    )`,
 ];
 
-function connectionUrl() {
-  return process.env.DATABASE_URL
-    || process.env.POSTGRES_URL
-    || process.env.POSTGRES_URL_NON_POOLING
+function connectionUrl(env = process.env) {
+  return env.DATABASE_URL
+    || env.POSTGRES_URL
+    || env.POSTGRES_URL_NON_POOLING
     || '';
 }
 
-export function postgresConfigured() {
-  if (connectionUrl()) return true;
-  return Boolean(process.env.PGHOST && process.env.PGUSER && process.env.PGDATABASE);
+export function postgresConfigured(env = process.env) {
+  if (connectionUrl(env)) return true;
+  return Boolean(env.PGHOST && env.PGUSER && env.PGDATABASE);
 }
 
 // Neon 等托管数据库会主动断开空闲连接；不监听该事件会导致进程崩溃。
@@ -217,8 +204,8 @@ function attachIdleErrorHandler(pool) {
   return pool;
 }
 
-export function createPostgresPool() {
-  const url = connectionUrl();
+export function createPostgresPool(env = process.env) {
+  const url = connectionUrl(env);
   if (url) {
     return attachIdleErrorHandler(new pg.Pool({
       connectionString: url,
@@ -227,19 +214,54 @@ export function createPostgresPool() {
       connectionTimeoutMillis: 8000,
     }));
   }
-  const host = process.env.PGHOST;
+  const host = env.PGHOST;
   const config = {
     host,
-    port: Number(process.env.PGPORT) || 5432,
-    user: process.env.PGUSER,
-    password: process.env.PGPASSWORD,
-    database: process.env.PGDATABASE,
-    max: Number(process.env.PG_CONNECTION_LIMIT) || 5,
+    port: Number(env.PGPORT) || 5432,
+    user: env.PGUSER,
+    password: env.PGPASSWORD,
+    database: env.PGDATABASE,
+    max: Number(env.PG_CONNECTION_LIMIT) || 5,
     connectionTimeoutMillis: 8000,
   };
   const local = /^(localhost|127\.0\.0\.1|::1)$/i.test(String(host || ''));
-  config.ssl = local || process.env.PGSSL === '0' ? false : { rejectUnauthorized: false };
+  config.ssl = local || env.PGSSL === '0' ? false : { rejectUnauthorized: false };
   return attachIdleErrorHandler(new pg.Pool(config));
+}
+
+// Workers 专用：Cloudflare 禁止跨请求复用 I/O 对象，所以每个请求新建一条连接。
+// 连接串优先取 Hyperdrive 绑定（env.HYPERDRIVE.connectionString），其次 Neon 直连串。
+let workersSchemaReady = false;
+
+export async function createWorkersPostgresStores(env, { initialPassword } = {}) {
+  const connectionString = (env.HYPERDRIVE && env.HYPERDRIVE.connectionString) || connectionUrl(env);
+  if (!connectionString) throw new Error('Cloudflare 未配置 HYPERDRIVE 或 DATABASE_URL');
+  // Hyperdrive / Neon 都要求 TLS；Hyperdrive 使用 Cloudflare 自签证书，关闭链校验。
+  const ssl = /sslmode=disable|sslmode=no-verify/i.test(connectionString) ? false : { rejectUnauthorized: false };
+  const client = new pg.Client({ connectionString, ssl });
+  await client.connect();
+  const pool = {
+    query: (sql, params) => client.query(sql, params),
+    // PgCatalogStore 的事务方法会 pool.connect()，这里复用同一条连接。
+    connect: async () => ({
+      query: (sql, params) => client.query(sql, params),
+      release: () => {},
+    }),
+    end: async () => { try { await client.end(); } catch {} },
+  };
+  try {
+    const catalogStore = new PgCatalogStore(pool);
+    const adminStore = new PgAdminStore(pool, { initialPassword });
+    if (!workersSchemaReady) {
+      await catalogStore.initSchema();
+      await adminStore.init();
+      workersSchemaReady = true;
+    }
+    return { catalogStore, adminStore, backend: 'postgres', close: async () => { await pool.end(); } };
+  } catch (error) {
+    await pool.end();
+    throw error;
+  }
 }
 
 // ---------------- Catalog ----------------

@@ -1,46 +1,61 @@
 // 趣影 VOD 聚合服务：适配 4K 站（HTML）与暴风站（MacCMS JSON API），
 // 输出统一的 TVBox / MacCMS 兼容接口。列表与详情来自上游公开页面，
 // 播放地址实时解析且不落库；海报按需走同源代理。
-import http from 'node:http';
-import https from 'node:https';
-import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { fileURLToPath } from 'node:url';
-import { DEFAULT_LIVE_SOURCES, LIVE_EPG_URL, LIVE_GROUP_NAMES, LiveCollector, buildLiveM3U, queryLiveChannels } from './live.mjs';
+import { DEFAULT_LIVE_SOURCES, LIVE_EPG_URL, LIVE_GROUP_NAMES, LiveCollector, buildLiveM3U, queryLiveChannels, readLocalLiveSources } from './live.mjs';
+import { isWorkers, ENV, httpGetText as runtimeGetText, readAssetText } from './runtime.mjs';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// Workers 打包后 import.meta.url 可能为空，这里给出可用的兜底目录。
+const __dirname = path.dirname(fileURLToPath(import.meta.url || 'file:///bundle/server.mjs'));
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
-let catalogStore = null;
-let adminStore = null;
-try {
-  const { initStores } = await import('./db-layer.mjs');
-  const stores = await initStores({ initialPassword: process.env.ADMIN_PASSWORD, moduleDir: __dirname });
-  catalogStore = stores.catalogStore;
-  adminStore = stores.adminStore;
-  if (stores.backend === 'postgres') {
-    console.log('[quying] using external PostgreSQL for persistence');
-  } else {
-    console.warn('[quying] using local SQLite (non-persistent across restarts)');
-    if (!process.env.ADMIN_PASSWORD) {
-      console.warn('[quying] admin 默认密码 admin123，请登录 /admin 后立即修改');
+// 存储实例：
+// - Node：进程启动时初始化一次，长驻复用连接池；
+// - Workers：每个请求建立一条到 Hyperdrive / Neon 的连接，绑定在 AsyncLocalStorage 上，
+//   避免 Cloudflare「I/O 对象不能跨请求复用」的限制。
+let rootCatalogStore = null;
+let rootAdminStore = null;
+const requestStores = new AsyncLocalStorage();
+
+const STORES = {
+  get catalogStore() { return requestStores.getStore()?.catalogStore ?? rootCatalogStore; },
+  get adminStore() { return requestStores.getStore()?.adminStore ?? rootAdminStore; },
+};
+
+async function initNodeStores() {
+  try {
+    const { initStores } = await import('./db-layer.mjs');
+    const stores = await initStores({ initialPassword: ENV.ADMIN_PASSWORD, moduleDir: __dirname, env: ENV });
+    rootCatalogStore = stores.catalogStore;
+    rootAdminStore = stores.adminStore;
+    if (stores.backend === 'postgres') {
+      console.log('[quying] using external PostgreSQL for persistence');
+    } else {
+      console.warn('[quying] using local SQLite (non-persistent across restarts)');
+      if (!ENV.ADMIN_PASSWORD) {
+        console.warn('[quying] admin 默认密码 admin123，请登录 /admin 后立即修改');
+      }
     }
+  } catch (error) {
+    console.warn(`[quying] data store disabled: ${String(error.message || error)}`);
   }
-} catch (error) {
-  console.warn(`[quying] data store disabled: ${String(error.message || error)}`);
 }
 
-const PORT = Number(process.env.PORT) || 8000;
+if (!isWorkers) await initNodeStores();
+
+const PORT = Number(ENV.PORT) || 8000;
 const HOST = '0.0.0.0';
 // 暴风资源 mirrors are tried in order when a request fails or returns an
 // abnormal response. A comma-separated VOD_UPSTREAM_HOST can override them.
-const UPSTREAM_HOSTS = (process.env.VOD_UPSTREAM_HOST || 'https://bfzy1.tv,https://bfzy2.tv,https://bfzy3.tv,https://bfzy4.tv,https://bfzy5.tv')
+const UPSTREAM_HOSTS = (ENV.VOD_UPSTREAM_HOST || 'https://bfzy1.tv,https://bfzy2.tv,https://bfzy3.tv,https://bfzy4.tv,https://bfzy5.tv')
   .split(',')
   .map((host) => host.trim().replace(/\/+$/, ''))
   .filter(Boolean);
-const FOURKCZ_HOSTS = (process.env.FOURKCZ_UPSTREAM_HOST || 'https://www.4kcz.com,https://4kcz.com,https://czzy.top,https://cz4k.com')
+const FOURKCZ_HOSTS = (ENV.FOURKCZ_UPSTREAM_HOST || 'https://www.4kcz.com,https://4kcz.com,https://czzy.top,https://cz4k.com')
   .split(',')
   .map((host) => host.trim().replace(/\/+$/, ''))
   .filter(Boolean);
@@ -85,12 +100,12 @@ const FOURK_CARD_TYPES = {
   '短剧': 5, '短剧大全': 58,
 };
 const FOURK_QUALITY_LABELS = new Set(['1080P', '720P', '4K', '高清', '蓝光']);
-const PUBLIC_URL = (process.env.PUBLIC_URL || '').replace(/\/+$/, '');
-const UPSTREAM_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS) || 5000;
-const PAGE_SIZE = Math.max(10, Math.min(100, Number(process.env.VOD_PAGE_SIZE) || 40));
+const PUBLIC_URL = (ENV.PUBLIC_URL || '').replace(/\/+$/, '');
+const UPSTREAM_TIMEOUT_MS = Number(ENV.UPSTREAM_TIMEOUT_MS) || 5000;
+const PAGE_SIZE = Math.max(10, Math.min(100, Number(ENV.VOD_PAGE_SIZE) || 40));
 // 卡密强制授权开关：设为 1 时，片库列表/详情/搜索/TVBox 配置/播放解析均需携带有效卡密。
 // 默认关闭，保持向后兼容；线上 Vercel 配置 REQUIRE_CARD=1 开启。
-const REQUIRE_CARD = process.env.REQUIRE_CARD === '1';
+const REQUIRE_CARD = ENV.REQUIRE_CARD === '1';
 // 需要授权才能访问的路径（精确匹配）。公开路径：/api/health、/api/site、/api/ads、
 // /api/card/verify、/img、/api/admin/*、/admin 与静态前端。
 const AUTH_PROTECTED_PATHS = new Set([
@@ -105,27 +120,27 @@ const AUTH_PROTECTED_PATHS = new Set([
 const UPSTREAM_PAGE_SIZE = 20;
 // Upstream sites rate-limit aggressive clients. Space requests per host, keep
 // cached pages longer, and rest a failing host before touching it again.
-const UPSTREAM_MIN_INTERVAL_MS = Math.max(0, Number(process.env.UPSTREAM_MIN_INTERVAL_MS ?? '400') || 0);
-const UPSTREAM_COOLDOWN_MS = Math.max(0, Number(process.env.UPSTREAM_COOLDOWN_MS ?? '120000') || 0);
-const UPSTREAM_BLOCK_COOLDOWN_MS = Math.max(0, Number(process.env.UPSTREAM_BLOCK_COOLDOWN_MS ?? '900000') || 0);
-const IMAGE_PROXY_ENABLED = process.env.DISABLE_IMAGE_PROXY !== '1';
+const UPSTREAM_MIN_INTERVAL_MS = Math.max(0, Number(ENV.UPSTREAM_MIN_INTERVAL_MS ?? '400') || 0);
+const UPSTREAM_COOLDOWN_MS = Math.max(0, Number(ENV.UPSTREAM_COOLDOWN_MS ?? '120000') || 0);
+const UPSTREAM_BLOCK_COOLDOWN_MS = Math.max(0, Number(ENV.UPSTREAM_BLOCK_COOLDOWN_MS ?? '900000') || 0);
+const IMAGE_PROXY_ENABLED = ENV.DISABLE_IMAGE_PROXY !== '1';
 const PIC_KEYS = new Set(['vod_pic', 'vod_pic_slide', 'vod_pic_thumb']);
 const CN_NUM = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十'];
 const TTL = {
-  list: Math.max(60000, Number(process.env.UPSTREAM_LIST_TTL_MS) || 900000),
-  detail: Math.max(60000, Number(process.env.UPSTREAM_DETAIL_TTL_MS) || 1800000),
+  list: Math.max(60000, Number(ENV.UPSTREAM_LIST_TTL_MS) || 900000),
+  detail: Math.max(60000, Number(ENV.UPSTREAM_DETAIL_TTL_MS) || 1800000),
   tvbox: 3600000,
 };
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
-const LIVE_FETCH_TIMEOUT_MS = Math.max(1000, Number(process.env.LIVE_FETCH_TIMEOUT_MS) || 20000);
-const LIVE_CACHE_TTL_MS = Math.max(0, Number(process.env.LIVE_CACHE_TTL_MS ?? '21600000') || 0);
+const LIVE_FETCH_TIMEOUT_MS = Math.max(1000, Number(ENV.LIVE_FETCH_TIMEOUT_MS) || 20000);
+const LIVE_CACHE_TTL_MS = Math.max(0, Number(ENV.LIVE_CACHE_TTL_MS ?? '21600000') || 0);
 // 冷启动保护：进程刚起来、快照还没采完时，首个请求最多同步等待这么久；
 // 超时就先回 collecting 占位，把采集留在后台继续，避免整套采集撞上网关 30s 超时变成 504。
-const LIVE_COLD_WAIT_MS = Math.max(0, Number(process.env.LIVE_COLD_WAIT_MS ?? '8000') || 0);
+const LIVE_COLD_WAIT_MS = Math.max(0, Number(ENV.LIVE_COLD_WAIT_MS ?? '8000') || 0);
 // 启动即预热直播快照（仅长驻进程，Vercel 每请求冷启动不适用）。
-const LIVE_WARMUP = process.env.LIVE_WARMUP !== '0';
-const LIVE_SOURCES = process.env.LIVE_SOURCES
-  ? process.env.LIVE_SOURCES.split(',').map((url) => url.trim()).filter(Boolean).map((url, index) => ({ name: `自定义源${index + 1}`, url }))
+const LIVE_WARMUP = ENV.LIVE_WARMUP !== '0';
+const LIVE_SOURCES = ENV.LIVE_SOURCES
+  ? ENV.LIVE_SOURCES.split(',').map((url) => url.trim()).filter(Boolean).map((url, index) => ({ name: `自定义源${index + 1}`, url }))
   : DEFAULT_LIVE_SOURCES;
 
 // Headline categories exposed by this site. The provider only tags leaves, so
@@ -190,7 +205,8 @@ function writeBody(res, status, headers, body) {
   const type = String(headers['Content-Type'] || '');
   const acceptsGzip = !!req && /\bgzip\b/.test(String(req.headers['accept-encoding'] || ''));
   const base = { ...headers, Vary: 'Accept-Encoding' };
-  if (acceptsGzip && COMPRESSIBLE_TYPE_RE.test(type)) {
+  // Workers 由 Cloudflare 边缘自动压缩，这里只处理 Node 长驻进程。
+  if (!isWorkers && acceptsGzip && COMPRESSIBLE_TYPE_RE.test(type)) {
     const gz = zlib.gzipSync(body, { level: 6 });
     res.writeHead(status, { ...base, 'Content-Encoding': 'gzip', 'Content-Length': gz.length });
     res.end(gz);
@@ -375,62 +391,10 @@ function normalizeItem(v, base, withPlay) {
   return item;
 }
 
+// 上游抓取：Node 用 http/https（可指定 TLS 1.2 绕开 4K WAF），
+// Workers 用 fetch；两者返回结构一致，便于全站共用。
 function httpGetText(target, opts = {}) {
-  return new Promise((resolveRequest) => {
-    let settled = false;
-    let totalTimer = null;
-    const resolve = (value) => {
-      if (settled) return;
-      settled = true;
-      if (totalTimer) clearTimeout(totalTimer);
-      resolveRequest(value);
-    };
-    let parsed;
-    try { parsed = new URL(target); } catch { resolve({ status: 0, error: 'invalid url' }); return; }
-    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-      resolve({ status: 0, error: 'invalid protocol' });
-      return;
-    }
-    const remaining = opts.deadline ? opts.deadline - Date.now() : (opts.timeout || UPSTREAM_TIMEOUT_MS);
-    if (remaining <= 0) { resolve({ status: 0, error: 'upstream timeout' }); return; }
-    const lib = parsed.protocol === 'https:' ? https : http;
-    // 4K 站点的 WAF 会拦截 Node 的 TLS 1.3 指纹，强制 TLS 1.2 才能拿到正常页面。
-    const tlsOptions = parsed.protocol === 'https:' && opts.tls12
-      ? { minVersion: 'TLSv1.2', maxVersion: 'TLSv1.2' }
-      : {};
-    const req = lib.get(parsed, { headers: opts.headers || {}, family: 4, ...tlsOptions }, (resp) => {
-      const status = resp.statusCode || 0;
-      const location = resp.headers.location;
-      if (opts.followRedirects && location && status >= 300 && status < 400) {
-        let next;
-        try { next = new URL(location, parsed); } catch {
-          resp.resume();
-          resolve({ status: 0, error: 'invalid redirect' });
-          return;
-        }
-        const redirects = (opts.redirects || 0) + 1;
-        const allowed = opts.redirectAllowed ? opts.redirectAllowed(next) : next.origin === parsed.origin;
-        // 不要 destroy：销毁请求会触发 error 事件，抢在重定向结果前把 Promise 判为失败。
-        resp.resume();
-        if (redirects > 3 || !allowed) { resolve({ status: 0, error: 'redirect not allowed' }); return; }
-        resolve(httpGetText(next.toString(), { ...opts, redirects }));
-        return;
-      }
-      const chunks = [];
-      resp.on('data', (c) => chunks.push(c));
-      resp.on('end', () => resolve({
-        status,
-        headers: resp.headers || {},
-        body: Buffer.concat(chunks),
-      }));
-      resp.on('error', (e) => resolve({ status: 0, error: String((e && e.message) || e) }));
-    });
-    req.on('error', (e) => resolve({ status: 0, error: String((e && e.message) || e) }));
-    // setTimeout 只限制 socket 空闲时间；总计时器同时限制持续慢速传输，避免清单永远不结束。
-    totalTimer = setTimeout(() => req.destroy(new Error('upstream timeout')), remaining);
-    if (typeof totalTimer.unref === 'function') totalTimer.unref();
-    req.setTimeout(Math.min(opts.timeout || UPSTREAM_TIMEOUT_MS, remaining), () => req.destroy(new Error('upstream timeout')));
-  });
+  return runtimeGetText(target, { timeout: UPSTREAM_TIMEOUT_MS, ...opts });
 }
 
 // Build an upstream query string. The resource site sits behind a WAF rule
@@ -503,7 +467,7 @@ function liveUrlAllowed(raw) {
   try { parsed = new URL(raw); } catch { return false; }
   if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false;
   // 测试/开发环境允许 localhost 与 127.0.0.1 以便本地联调代理端点
-  if (process.env.ALLOW_LOCAL_PROXY === '1') return true;
+  if (ENV.ALLOW_LOCAL_PROXY === '1') return true;
   if (isPrivateHost(parsed.hostname)) return false;
   return true;
 }
@@ -520,47 +484,66 @@ function rewriteM3u8Segments(text, base, manifestUrl) {
   }).join('\n');
 }
 
-function pipeUpstream(target, res, opts = {}) {
-  return new Promise((resolveRequest) => {
-    let settled = false;
-    const resolve = (value) => { if (!settled) { settled = true; resolveRequest(value); } };
-    let parsed;
-    try { parsed = new URL(target); } catch { res.writeHead(400); res.end('bad url'); resolve(); return; }
-    if ((parsed.protocol !== 'https:' && parsed.protocol !== 'http:') || isPrivateHost(parsed.hostname)) {
-      res.writeHead(403, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: false, error: 'forbidden host' }));
-      resolve(); return;
-    }
-    const lib = parsed.protocol === 'https:' ? https : http;
-    const headers = opts.headers || { 'User-Agent': UA, Accept: '*/*' };
-    const out = lib.get(parsed, { headers, timeout: opts.timeout || 15000 }, (up) => {
-      const status = up.statusCode || 0;
-      const ctype = String(up.headers['content-type'] || '');
-      if (status >= 300 && status < 400 && up.headers.location) {
-        res.writeHead(302, { Location: up.headers.location, 'Cache-Control': 'no-store' });
-        res.end(); up.resume(); resolve(); return;
-      }
-      if (status < 200 || status >= 400) {
-        res.writeHead(status, { 'Content-Type': ctype || 'text/plain' });
-        up.pipe(res); resolve(); return;
-      }
-      const outHeaders = {};
-      if (ctype) outHeaders['Content-Type'] = ctype;
-      if (up.headers['content-length']) outHeaders['Content-Length'] = up.headers['content-length'];
-      outHeaders['Cache-Control'] = 'public, max-age=60';
-      outHeaders['Access-Control-Allow-Origin'] = '*';
-      res.writeHead(status, outHeaders);
-      up.pipe(res); resolve();
-    });
-    out.on('error', () => { res.writeHead(502, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, error: 'upstream error' })); resolve(); });
-    out.on('timeout', () => { out.destroy(); });
-  });
+async function pipeUpstream(target, res, opts = {}) {
+  let parsed;
+  try { parsed = new URL(target); } catch { res.writeHead(400); res.end('bad url'); return; }
+  if ((parsed.protocol !== 'https:' && parsed.protocol !== 'http:') || isPrivateHost(parsed.hostname)) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: 'forbidden host' }));
+    return;
+  }
+  const headers = opts.headers || { 'User-Agent': UA, Accept: '*/*' };
+  // 不跟随重定向：分片源可能 302 到 CDN，交给客户端跟随，避免服务端放大流量。
+  const r = await httpGetText(parsed.toString(), { headers, timeout: opts.timeout || 15000 });
+  if (r.error) {
+    res.writeHead(502, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: 'upstream error' }));
+    return;
+  }
+  const status = r.status;
+  const ctype = String((r.headers && r.headers['content-type']) || '');
+  if (status >= 300 && status < 400 && r.headers.location) {
+    res.writeHead(302, { Location: r.headers.location, 'Cache-Control': 'no-store' });
+    res.end();
+    return;
+  }
+  if (status < 200 || status >= 400) {
+    res.writeHead(status, { 'Content-Type': ctype || 'text/plain' });
+    res.end(r.body);
+    return;
+  }
+  const outHeaders = {};
+  if (ctype) outHeaders['Content-Type'] = ctype;
+  if (r.body && r.body.length) outHeaders['Content-Length'] = r.body.length;
+  outHeaders['Cache-Control'] = 'public, max-age=60';
+  outHeaders['Access-Control-Allow-Origin'] = '*';
+  res.writeHead(status, outHeaders);
+  res.end(r.body);
+}
+
+// 本地兜底清单：Node 读 assets/ 目录；Workers 通过 Static Assets 读取构建期清单。
+async function loadLocalLiveSources() {
+  if (!isWorkers) return readLocalLiveSources();
+  const manifestText = await readAssetText('/assets/manifest.json');
+  if (!manifestText) return [];
+  let names = [];
+  try { names = JSON.parse(manifestText); } catch { return []; }
+  if (!Array.isArray(names)) return [];
+  const sources = [];
+  for (const name of names) {
+    if (typeof name !== 'string' || !/\.m3u$/i.test(name) || name.includes('/')) continue;
+    const text = await readAssetText(`/assets/${encodeURIComponent(name)}`);
+    if (!text || !text.replace(/^\uFEFF/, '').trimStart().startsWith('#EXTM3U')) continue;
+    sources.push({ name: `本地-${name.replace(/\.m3u$/i, '')}`, text, always: /-live\.m3u$/i.test(name) });
+  }
+  return sources;
 }
 
 const liveCollector = new LiveCollector({
   sources: LIVE_SOURCES,
   ttl: LIVE_CACHE_TTL_MS,
-  disableLocal: process.env.LIVE_DISABLE_LOCAL === '1',
+  disableLocal: ENV.LIVE_DISABLE_LOCAL === '1',
+  loadLocalSources: loadLocalLiveSources,
   fetchText: async (target) => {
     const origin = new URL(target).origin;
     if (hostCooling(origin)) throw new Error('直播源冷却中');
@@ -1159,13 +1142,13 @@ function catalogFailed(error) {
 }
 
 async function readCatalogQuery(key) {
-  if (!catalogStore) return null;
-  try { return await catalogStore.getQuery(key); } catch (error) { catalogFailed(error); return null; }
+  if (!STORES.catalogStore) return null;
+  try { return await STORES.catalogStore.getQuery(key); } catch (error) { catalogFailed(error); return null; }
 }
 
 async function saveCatalogQuery(key, value, ttl) {
-  if (!catalogStore) return false;
-  try { await catalogStore.saveQuery(key, value, ttl); return true; } catch (error) { catalogFailed(error); return false; }
+  if (!STORES.catalogStore) return false;
+  try { await STORES.catalogStore.saveQuery(key, value, ttl); return true; } catch (error) { catalogFailed(error); return false; }
 }
 
 const catalogRefreshQueue = [];
@@ -1193,7 +1176,7 @@ async function drainCatalogRefresh() {
 }
 
 function scheduleCatalogRefresh(key, ttl, loader) {
-  if (!catalogStore || catalogRefreshing.has(key)) return;
+  if (!STORES.catalogStore || catalogRefreshing.has(key)) return;
   if ((catalogRefreshRetryAt.get(key) || 0) > Date.now()) return;
   catalogRefreshing.add(key);
   catalogRefreshQueue.push({ key, ttl, loader });
@@ -1209,7 +1192,7 @@ async function catalogQuery(key, ttl, loader, localLoader) {
     if (!cached.stale) return cached.value;
     // Serverless 实例在响应结束后随时会被回收，后台刷新往往来不及落库。
     // 代价是过期后的第一次请求要同步刷新，但能保证采集结果必定写入数据库。
-    if (process.env.VERCEL) {
+    if (ENV.VERCEL || isWorkers) {
       try {
         const value = await loader();
         await saveCatalogQuery(key, value, ttl);
@@ -1221,7 +1204,7 @@ async function catalogQuery(key, ttl, loader, localLoader) {
     scheduleCatalogRefresh(key, ttl, loader);
     return cached.value;
   }
-  if (catalogStore && localLoader) {
+  if (STORES.catalogStore && localLoader) {
     let local = null;
     try { local = await localLoader(); } catch (error) { catalogFailed(error); }
     if (local && Array.isArray(local.list) && local.list.length) {
@@ -1504,7 +1487,7 @@ async function fetchSearch(wd, pg, withPlay) {
     key,
     TTL.list,
     () => fetchSearchLive(wd, page, withPlay),
-    () => catalogStore.searchVods(title, page, withPlay),
+    () => STORES.catalogStore.searchVods(title, page, withPlay),
   );
 }
 
@@ -1552,9 +1535,9 @@ async function fetchKanRank(cat, size) {
 }
 
 async function findLocalExactVod(title) {
-  if (!catalogStore) return null;
+  if (!STORES.catalogStore) return null;
   try {
-    const data = await catalogStore.searchVods(title, 1, false);
+    const data = await STORES.catalogStore.searchVods(title, 1, false);
     const list = Array.isArray(data && data.list) ? data.list : [];
     const key = titleKey(title);
     return list.find((v) => titleKey(v.vod_name) === key) || null;
@@ -1719,9 +1702,9 @@ async function fetchChannelPool(ch) {
     async () => {
       const fresh = await collectChannelPool(ch);
       // 与库内已有候选合并：上游部分页失败导致采集变少时，快照不会因此缩水。
-      if (catalogStore) {
+      if (STORES.catalogStore) {
         try {
-          const local = await catalogStore.channelVods(channelRule(ch));
+          const local = await STORES.catalogStore.channelVods(channelRule(ch));
           const seen = new Set(fresh.list.map((v) => String(v.vod_id)));
           const merged = [...fresh.list];
           for (const v of local.list || []) {
@@ -1733,7 +1716,7 @@ async function fetchChannelPool(ch) {
       }
       return fresh;
     },
-    catalogStore ? () => catalogStore.channelVods(channelRule(ch)) : undefined,
+    STORES.catalogStore ? () => STORES.catalogStore.channelVods(channelRule(ch)) : undefined,
   );
 }
 
@@ -1747,16 +1730,16 @@ function sliceChannelPool(pool, pg) {
 
 // 猜你喜欢：种子仅取库内已有详情派生演员/类型，不写共享缓存，无有效种子时回退口碑榜。
 async function fetchGuessPool(seeds, exclude) {
-  if (!catalogStore || !seeds.length) return null;
+  if (!STORES.catalogStore || !seeds.length) return null;
   let info = [];
-  try { info = await catalogStore.seedsInfo(seeds); } catch (error) { catalogFailed(error); return null; }
+  try { info = await STORES.catalogStore.seedsInfo(seeds); } catch (error) { catalogFailed(error); return null; }
   if (!info.length) return null;
   const actors = [...new Set(info
     .flatMap((r) => String(r.actor || '').split(/[,，/、]/).map((s) => s.trim()))
     .filter((s) => s && s.length <= 12 && !/^\d+$/.test(s)))].slice(0, 6);
   const typeIds = [...new Set(info.map((r) => String(r.type_id || '')).filter(Boolean))].slice(0, 8);
   if (!actors.length && !typeIds.length) return null;
-  const pool = await catalogStore.channelVods({ kind: 'guess', actors, typeIds, exclude, limit: CHANNEL_POOL_LIMIT });
+  const pool = await STORES.catalogStore.channelVods({ kind: 'guess', actors, typeIds, exclude, limit: CHANNEL_POOL_LIMIT });
   return pool.list.length ? pool : null;
 }
 
@@ -1911,18 +1894,25 @@ async function resolvePlayback(id, seq) {
 }
 
 function serveFile(res, filePath, versioned = false) {
-  fs.readFile(filePath, (err, data) => {
-    if (err) { sendJson(res, 404, { ok: false, error: 'not found' }); return; }
-    const ext = path.extname(filePath).toLowerCase();
-    let cache;
-    if (ext === '.html') cache = 'no-cache'; // 入口 HTML 始终轻量校验，保证新版本即时生效
-    else if (versioned) cache = 'public, max-age=31536000, immutable'; // 带 ?v= 的版本化资源由边缘 CDN 长期缓存
-    else cache = 'public, max-age=86400';
-    writeBody(res, 200, {
-      'Content-Type': MIME[ext] || 'application/octet-stream',
-      'Cache-Control': cache,
-    }, data);
-  });
+  if (isWorkers) {
+    // Workers 下静态文件由 worker.mjs 的 Assets 绑定直接返回，不应走到这里。
+    sendJson(res, 404, { ok: false, error: 'not found' });
+    return;
+  }
+  import('node:fs').then(({ default: fs }) => {
+    fs.readFile(filePath, (err, data) => {
+      if (err) { sendJson(res, 404, { ok: false, error: 'not found' }); return; }
+      const ext = path.extname(filePath).toLowerCase();
+      let cache;
+      if (ext === '.html') cache = 'no-cache'; // 入口 HTML 始终轻量校验，保证新版本即时生效
+      else if (versioned) cache = 'public, max-age=31536000, immutable'; // 带 ?v= 的版本化资源由边缘 CDN 长期缓存
+      else cache = 'public, max-age=86400';
+      writeBody(res, 200, {
+        'Content-Type': MIME[ext] || 'application/octet-stream',
+        'Cache-Control': cache,
+      }, data);
+    });
+  }).catch(() => sendJson(res, 500, { ok: false, error: 'static unavailable' }));
 }
 
 async function fetchImage(target) {
@@ -1991,16 +1981,16 @@ let insightCache = { at: 0, words: [], manual: [] };
 function resetInsights() { insightCache = { at: 0, words: [], manual: [] }; }
 
 async function insights() {
-  if (!adminStore) return { words: [], manual: [] };
+  if (!STORES.adminStore) return { words: [], manual: [] };
   if (Date.now() - insightCache.at < 30000) return insightCache;
   try {
-    const settings = await adminStore.getSettings();
+    const settings = await STORES.adminStore.getSettings();
     const words = String(settings.blocked_words || '')
       .split(/[\n,，]/)
       .map((w) => w.trim().toLowerCase())
       .filter(Boolean)
       .slice(0, 500);
-    const manual = await adminStore.listManualVods();
+    const manual = await STORES.adminStore.listManualVods();
     insightCache = { at: Date.now(), words, manual };
   } catch (error) {
     console.warn('[quying] insight load failed:', error.message);
@@ -2137,7 +2127,7 @@ function parseCollectCursor(value) {
 
 // 分批采集：每次最多处理若干页，避免撞上 Serverless 执行时长上限。
 async function collectBatch({ pages = 3, force = false } = {}) {
-  const settings = await adminStore.getSettings();
+  const settings = await STORES.adminStore.getSettings();
   let cursor = parseCollectCursor(settings.collect_cursor);
   const limit = Math.min(Math.max(Number(pages) || 3, 1), COLLECT_MAX_PAGES);
   const started = Date.now();
@@ -2148,7 +2138,7 @@ async function collectBatch({ pages = 3, force = false } = {}) {
     if (i > 0 && Date.now() - started > 45000) break;
     const t = COLLECT_CATS[cursor.ci];
     const key = listCacheKey({ pg: cursor.page, t, year: '' });
-    const cached = await catalogStore.getQuery(key);
+    const cached = await STORES.catalogStore.getQuery(key);
     let pagecount = cached && cached.value ? Number(cached.value.pagecount) || 1 : 1;
     if (cached && !cached.stale && !force) {
       skipped += 1;
@@ -2165,7 +2155,7 @@ async function collectBatch({ pages = 3, force = false } = {}) {
     }
   }
   const total = (Number(settings.collect_total) || 0) + processed;
-  await adminStore.updateSettings({
+  await STORES.adminStore.updateSettings({
     collect_cursor: JSON.stringify(cursor),
     collect_last_run: String(Date.now()),
     collect_total: String(total),
@@ -2202,7 +2192,7 @@ function tvboxConfig(base, code) {
 
 // ---- 后台：公开站点配置、广告与鉴权 ----
 async function sitePayload() {
-  const settings = adminStore ? await adminStore.getSettings() : {};
+  const settings = STORES.adminStore ? await STORES.adminStore.getSettings() : {};
   return {
     ok: true,
     name: settings.site_name || '趣影',
@@ -2240,11 +2230,11 @@ function extractCardCode(req, url) {
 // 卡密强制授权中间件。返回 true 放行，false 表示已写入 401/503 响应，调用方应直接 return。
 async function enforceCardAuth(req, res, p, url) {
   if (!REQUIRE_CARD || !AUTH_PROTECTED_PATHS.has(p)) return true;
-  if (!adminStore) {
+  if (!STORES.adminStore) {
     sendJson(res, 503, { ok: false, error: '授权未启用：数据库不可用' });
     return false;
   }
-  const result = await adminStore.authorizeCard(extractCardCode(req, url));
+  const result = await STORES.adminStore.authorizeCard(extractCardCode(req, url));
   if (!result.valid) {
     sendJson(res, 401, { ok: false, error: result.reason || '需要有效授权卡密', code: 401 });
     return false;
@@ -2254,7 +2244,7 @@ async function enforceCardAuth(req, res, p, url) {
 
 async function adminToken(req) {
   const token = parseCookies(req).qy_admin;
-  return adminStore && await adminStore.validateSession(token) ? token : '';
+  return STORES.adminStore && await STORES.adminStore.validateSession(token) ? token : '';
 }
 
 function readJsonBody(req, limit = 64 * 1024) {
@@ -2287,7 +2277,7 @@ function csvCell(value) {
 }
 
 async function handleAdmin(req, res, p, url) {
-  if (!adminStore) {
+  if (!STORES.adminStore) {
     sendJson(res, 503, { ok: false, error: '后台未启用：数据库不可用' });
     return;
   }
@@ -2296,11 +2286,11 @@ async function handleAdmin(req, res, p, url) {
   if (p === '/api/admin/login' && method === 'POST') {
     let body;
     try { body = await readJsonBody(req); } catch (e) { sendJson(res, 400, { ok: false, error: e.message }); return; }
-    if (!await adminStore.verifyPassword(body.password || '')) {
+    if (!await STORES.adminStore.verifyPassword(body.password || '')) {
       sendJson(res, 401, { ok: false, error: '密码错误' });
       return;
     }
-    const token = await adminStore.createSession();
+    const token = await STORES.adminStore.createSession();
     res.setHeader('Set-Cookie', `qy_admin=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7 * 24 * 3600}`);
     sendJson(res, 200, { ok: true });
     return;
@@ -2318,7 +2308,7 @@ async function handleAdmin(req, res, p, url) {
       try { body = await readJsonBody(req); } catch { body = {}; }
     }
     if (!await adminToken(req)) {
-      const settings = await adminStore.getSettings();
+      const settings = await STORES.adminStore.getSettings();
       const expected = String(settings.collect_token || '');
       const given = String(body.token || url.searchParams.get('token') || '');
       if (!expected || given !== expected) {
@@ -2346,19 +2336,19 @@ async function handleAdmin(req, res, p, url) {
 
   try {
     if (p === '/api/admin/logout' && method === 'POST') {
-      await adminStore.destroySession(token);
+      await STORES.adminStore.destroySession(token);
       res.setHeader('Set-Cookie', 'qy_admin=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
       sendJson(res, 200, { ok: true });
       return;
     }
 
     if (p === '/api/admin/overview' && method === 'GET') {
-      sendJson(res, 200, { ok: true, data: await adminStore.overview() });
+      sendJson(res, 200, { ok: true, data: await STORES.adminStore.overview() });
       return;
     }
 
     if (p === '/api/admin/settings' && method === 'GET') {
-      sendJson(res, 200, { ok: true, data: await adminStore.getSettings() });
+      sendJson(res, 200, { ok: true, data: await STORES.adminStore.getSettings() });
       return;
     }
     if (p === '/api/admin/categories' && method === 'GET') {
@@ -2367,7 +2357,7 @@ async function handleAdmin(req, res, p, url) {
     }
     if (p === '/api/admin/settings' && method === 'PUT') {
       const body = await readJsonBody(req);
-      const data = await adminStore.updateSettings(body);
+      const data = await STORES.adminStore.updateSettings(body);
       resetInsights();
       sendJson(res, 200, { ok: true, data });
       return;
@@ -2375,20 +2365,20 @@ async function handleAdmin(req, res, p, url) {
 
     // ---- 手动影片 ----
     if (p === '/api/admin/videos' && method === 'GET') {
-      sendJson(res, 200, { ok: true, list: await adminStore.listManualVods() });
+      sendJson(res, 200, { ok: true, list: await STORES.adminStore.listManualVods() });
       return;
     }
     if (p === '/api/admin/videos' && method === 'POST') {
       const body = await readJsonBody(req);
       const vod = normalizeManualVod(body);
-      await adminStore.saveManualVod(vod);
+      await STORES.adminStore.saveManualVod(vod);
       resetInsights();
       sendJson(res, 200, { ok: true, data: vod });
       return;
     }
     const videoMatch = p.match(/^\/api\/admin\/videos\/(manual-[a-z0-9]{4,24})$/);
     if (videoMatch && method === 'DELETE') {
-      await adminStore.deleteManualVod(videoMatch[1]);
+      await STORES.adminStore.deleteManualVod(videoMatch[1]);
       resetInsights();
       sendJson(res, 200, { ok: true, deleted: true });
       return;
@@ -2396,7 +2386,7 @@ async function handleAdmin(req, res, p, url) {
 
     // ---- 采集状态与密钥 ----
     if (p === '/api/admin/collect/status' && method === 'GET') {
-      const settings = await adminStore.getSettings();
+      const settings = await STORES.adminStore.getSettings();
       sendJson(res, 200, {
         ok: true,
         data: {
@@ -2411,50 +2401,50 @@ async function handleAdmin(req, res, p, url) {
     }
     if (p === '/api/admin/collect/token' && method === 'POST') {
       const tokenValue = crypto.randomBytes(16).toString('hex');
-      await adminStore.updateSettings({ collect_token: tokenValue });
+      await STORES.adminStore.updateSettings({ collect_token: tokenValue });
       sendJson(res, 200, { ok: true, token: tokenValue });
       return;
     }
 
     if (p === '/api/admin/password' && method === 'POST') {
       const body = await readJsonBody(req);
-      if (!await adminStore.verifyPassword(body.oldPassword || '')) {
+      if (!await STORES.adminStore.verifyPassword(body.oldPassword || '')) {
         sendJson(res, 400, { ok: false, error: '原密码错误' });
         return;
       }
       const next = String(body.newPassword || '');
       if (next.length < 6) { sendJson(res, 400, { ok: false, error: '新密码至少 6 位' }); return; }
-      await adminStore.setPassword(next);
-      await adminStore.destroySession(token);
+      await STORES.adminStore.setPassword(next);
+      await STORES.adminStore.destroySession(token);
       res.setHeader('Set-Cookie', 'qy_admin=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
       sendJson(res, 200, { ok: true, relogin: true });
       return;
     }
 
     if (p === '/api/admin/ads' && method === 'GET') {
-      sendJson(res, 200, { ok: true, list: await adminStore.listAds(url.searchParams.get('slot')) });
+      sendJson(res, 200, { ok: true, list: await STORES.adminStore.listAds(url.searchParams.get('slot')) });
       return;
     }
     if (p === '/api/admin/ads' && method === 'POST') {
       const body = await readJsonBody(req);
-      sendJson(res, 200, { ok: true, data: await adminStore.createAd(body) });
+      sendJson(res, 200, { ok: true, data: await STORES.adminStore.createAd(body) });
       return;
     }
     const adMatch = p.match(/^\/api\/admin\/ads\/(\d+)$/);
     if (adMatch && method === 'PUT') {
       const body = await readJsonBody(req);
-      sendJson(res, 200, { ok: true, data: await adminStore.updateAd(adMatch[1], body) });
+      sendJson(res, 200, { ok: true, data: await STORES.adminStore.updateAd(adMatch[1], body) });
       return;
     }
     if (adMatch && method === 'DELETE') {
-      sendJson(res, 200, { ok: true, deleted: await adminStore.deleteAd(adMatch[1]) });
+      sendJson(res, 200, { ok: true, deleted: await STORES.adminStore.deleteAd(adMatch[1]) });
       return;
     }
 
     if (p === '/api/admin/cards' && method === 'GET') {
       sendJson(res, 200, {
         ok: true,
-        data: await adminStore.listCards({
+        data: await STORES.adminStore.listCards({
           status: url.searchParams.get('status') || '',
           q: url.searchParams.get('q') || '',
           page: url.searchParams.get('page'),
@@ -2465,13 +2455,13 @@ async function handleAdmin(req, res, p, url) {
     }
     if (p === '/api/admin/cards/generate' && method === 'POST') {
       const body = await readJsonBody(req);
-      const codes = await adminStore.generateCards(body);
+      const codes = await STORES.adminStore.generateCards(body);
       sendJson(res, 200, { ok: true, codes });
       return;
     }
     if (p === '/api/admin/cards/export' && method === 'GET') {
       const rows = ['卡密,天数,状态,备注,创建时间,使用时间'];
-      for (const card of await adminStore.exportCards()) {
+      for (const card of await STORES.adminStore.exportCards()) {
         rows.push([
           card.code, Number(card.days) ? card.days : '永久', card.status, card.note,
           card.createdAt ? new Date(card.createdAt).toISOString() : '',
@@ -2489,11 +2479,11 @@ async function handleAdmin(req, res, p, url) {
     const cardMatch = p.match(/^\/api\/admin\/cards\/(\d+)$/);
     if (cardMatch && method === 'PATCH') {
       const body = await readJsonBody(req);
-      sendJson(res, 200, { ok: true, updated: await adminStore.setCardStatus(cardMatch[1], body.status) });
+      sendJson(res, 200, { ok: true, updated: await STORES.adminStore.setCardStatus(cardMatch[1], body.status) });
       return;
     }
     if (cardMatch && method === 'DELETE') {
-      sendJson(res, 200, { ok: true, deleted: await adminStore.deleteCard(cardMatch[1]) });
+      sendJson(res, 200, { ok: true, deleted: await STORES.adminStore.deleteCard(cardMatch[1]) });
       return;
     }
 
@@ -2503,8 +2493,8 @@ async function handleAdmin(req, res, p, url) {
   }
 }
 
-// 请求处理器：既供本地 http.createServer 使用，也作为 Vercel Serverless 函数入口导出
-export async function requestHandler(req, res) {
+// 请求处理主体：既供 Node http.createServer 使用，也由 requestHandler 在 Workers 中调用。
+async function handleRequest(req, res) {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
@@ -2548,13 +2538,13 @@ export async function requestHandler(req, res) {
   }
   if (p === '/api/ads') {
     const slot = url.searchParams.get('slot') === 'nav' ? 'nav' : 'carousel';
-    sendJsonCacheable(res, 200, { ok: true, list: adminStore ? await adminStore.publicAds(slot) : [] }, { sMaxAge: 300 });
+    sendJsonCacheable(res, 200, { ok: true, list: STORES.adminStore ? await STORES.adminStore.publicAds(slot) : [] }, { sMaxAge: 300 });
     return;
   }
   if (p === '/api/card/verify') {
     const code = (url.searchParams.get('code') || '').trim();
     if (!code) { sendJson(res, 400, { ok: false, error: 'code is required' }); return; }
-    sendJsonCacheable(res, 200, { ok: true, ...(adminStore ? await adminStore.verifyCard(code) : { valid: false, reason: '后台未启用' }) }, { sMaxAge: 60, maxAge: 10 });
+    sendJsonCacheable(res, 200, { ok: true, ...(STORES.adminStore ? await STORES.adminStore.verifyCard(code) : { valid: false, reason: '后台未启用' }) }, { sMaxAge: 60, maxAge: 10 });
     return;
   }
 
@@ -2564,7 +2554,7 @@ export async function requestHandler(req, res) {
   // ---- 直播：多源 M3U 采集、同名合并与分页查询，播放地址由客户端直连 ----
   if (p === '/api/live/refresh') {
     if (req.method !== 'POST') { sendJson(res, 405, { ok: false, error: 'method not allowed' }); return; }
-    if (!adminStore) { sendJson(res, 503, { ok: false, error: '后台未启用：数据库不可用' }); return; }
+    if (!STORES.adminStore) { sendJson(res, 503, { ok: false, error: '后台未启用：数据库不可用' }); return; }
     if (!await adminToken(req)) { sendJson(res, 401, { ok: false, error: '请先登录' }); return; }
     if (!sameOrigin(req)) { sendJson(res, 403, { ok: false, error: '跨站请求被拒绝' }); return; }
     try {
@@ -2924,6 +2914,11 @@ export async function requestHandler(req, res) {
   }
 
   // Static frontend
+  if (isWorkers) {
+    // Workers 下静态资源由 worker.mjs 的 Assets 绑定返回，正常不会走到这里。
+    sendJson(res, 404, { ok: false, error: 'not found' });
+    return;
+  }
   let rel = decodeURIComponent(p);
   if (rel === '/' || rel === '') rel = '/index.html';
   const filePath = path.normalize(path.join(PUBLIC_DIR, rel));
@@ -2931,45 +2926,76 @@ export async function requestHandler(req, res) {
     sendJson(res, 403, { ok: false, error: 'forbidden' });
     return;
   }
-  fs.stat(filePath, (err, st) => {
-    if (err || !st.isFile()) {
-      if (!path.extname(rel)) {
-        serveFile(res, path.join(PUBLIC_DIR, 'index.html'));
+  import('node:fs').then(({ default: fs }) => {
+    fs.stat(filePath, (err, st) => {
+      if (err || !st.isFile()) {
+        if (!path.extname(rel)) {
+          serveFile(res, path.join(PUBLIC_DIR, 'index.html'));
+          return;
+        }
+        sendJson(res, 404, { ok: false, error: 'not found' });
         return;
       }
-      sendJson(res, 404, { ok: false, error: 'not found' });
-      return;
-    }
-    serveFile(res, filePath, /[?&]v=/.test(req.url || ''));
-  });
+      serveFile(res, filePath, /[?&]v=/.test(req.url || ''));
+    });
+  }).catch(() => sendJson(res, 404, { ok: false, error: 'not found' }));
 }
 
-const server = http.createServer(requestHandler);
+// 请求入口：
+// - Node：长驻进程直接调用，进程内存储已初始化一次；
+// - Workers：每个请求建立一次存储连接，并通过 AsyncLocalStorage 做请求隔离。
+export async function requestHandler(req, res) {
+  if (!isWorkers) return handleRequest(req, res);
+  let stores = null;
+  try {
+    const { initStores } = await import('./db-layer.mjs');
+    stores = await initStores({ initialPassword: ENV.ADMIN_PASSWORD, moduleDir: __dirname, env: ENV });
+  } catch (error) {
+    console.warn(`[quying] data store disabled: ${String(error.message || error)}`);
+  }
+  try {
+    return await requestStores.run(
+      { catalogStore: stores?.catalogStore || null, adminStore: stores?.adminStore || null },
+      () => handleRequest(req, res),
+    );
+  } finally {
+    if (stores?.close) { try { await stores.close(); } catch {} }
+  }
+}
 
-server.on('error', (e) => {
-  console.error('[quying] server error:', (e && e.message) || e);
-  process.exit(1);
-});
+// 直播快照预热：Node 启动时调用；Workers 由 worker.mjs 放进 ctx.waitUntil。
+export function warmLiveSnapshot() {
+  return liveCollector.getSnapshot();
+}
 
-// Vercel 等 Serverless 环境由平台调用 requestHandler，不需要自己监听端口
-if (!process.env.VERCEL) {
+// Node 长驻进程入口（Vercel / Workers 由平台调用 requestHandler，不监听端口）。
+if (!isWorkers && !ENV.VERCEL) {
+  const { default: http } = await import('node:http');
+  const server = http.createServer(requestHandler);
+
+  server.on('error', (e) => {
+    console.error('[quying] server error:', (e && e.message) || e);
+    process.exit(1);
+  });
+
   server.listen(PORT, HOST, () => {
     console.log(`[quying] listening on http://${HOST}:${PORT}`);
   });
   // 启动即预热直播快照：把十几秒的采集挪到后台，首个用户请求直接命中缓存而不是等采集。
   if (LIVE_WARMUP) {
-    liveCollector.getSnapshot()
+    warmLiveSnapshot()
       .then((snapshot) => console.log(`[quying] live snapshot warmed: ${snapshot.channels.length} channels`))
       .catch((error) => console.warn('[quying] live warmup failed:', (error && error.message) || error));
   }
 }
 
-// Vercel 要求入口模块的默认导出是函数或 server
 export default requestHandler;
 
-process.on('uncaughtException', (e) => {
-  console.error('[quying] uncaughtException:', (e && e.message) || e);
-});
-process.on('unhandledRejection', (e) => {
-  console.error('[quying] unhandledRejection:', (e && e.message) || e);
-});
+if (!isWorkers) {
+  process.on('uncaughtException', (e) => {
+    console.error('[quying] uncaughtException:', (e && e.message) || e);
+  });
+  process.on('unhandledRejection', (e) => {
+    console.error('[quying] unhandledRejection:', (e && e.message) || e);
+  });
+}

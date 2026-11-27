@@ -1,9 +1,9 @@
 import crypto from 'node:crypto';
-import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// Workers 打包后 import.meta.url 可能为空，这里给出可用的兜底目录。
+const __dirname = path.dirname(fileURLToPath(import.meta.url || 'file:///bundle/live.mjs'));
 
 export const LIVE_GROUP_NAMES = ['央视', '卫视', '地方', '体育', '影视', '少儿', '港澳台', '国际', '其他'];
 export const LIVE_EPG_URL = 'http://epg.51zmt.top:8000/e.xml';
@@ -53,7 +53,11 @@ export const DISABLED_LIVE_SOURCES = [
 
 // 可选本地 assets/ 兜底：用户可在 dyrs-vod-web/assets/ 或 public/assets/ 放置 .m3u 文件，
 // 当远端源全部不可用时仍有基础频道。优先级低于远端，远端同名频道不会被本地覆盖。
-function readLocalLiveSources() {
+async function readLocalLiveSources() {
+  // Workers 没有文件系统：本地清单由 server.mjs 注入的 loadLocalSources 从 Assets 读取。
+  if (typeof globalThis.__CF_ENV__ !== 'undefined') return [];
+  let fs;
+  try { fs = (await import('node:fs')).default; } catch { return []; }
   const candidates = [
     path.join(__dirname, 'assets'),
     path.join(__dirname, '..', 'assets'),
@@ -78,6 +82,8 @@ function readLocalLiveSources() {
   }
   return sources;
 }
+
+export { readLocalLiveSources };
 
 function cleanName(value) {
   return String(value || '')
@@ -379,10 +385,11 @@ export function buildLiveM3U(channels) {
 }
 
 export class LiveCollector {
-  constructor({ sources = DEFAULT_LIVE_SOURCES, fetchText, ttl = 21600000, disableLocal = false } = {}) {
+  constructor({ sources = DEFAULT_LIVE_SOURCES, fetchText, ttl = 21600000, disableLocal = false, loadLocalSources } = {}) {
     if (typeof fetchText !== 'function') throw new Error('fetchText is required');
     this.sources = sources;
     this.fetchText = fetchText;
+    this.loadLocalSources = typeof loadLocalSources === 'function' ? loadLocalSources : readLocalLiveSources;
     this.ttl = Math.max(0, Number(ttl) || 0);
     this.disableLocal = disableLocal;
     this.snapshot = null;
@@ -395,7 +402,7 @@ export class LiveCollector {
     const entries = [];
     // 常驻本地补充源（文件名以 -live.m3u 结尾）：先于远端进入，使其线路排在 lines[0] 优先播放
     if (!this.disableLocal) {
-      for (const src of readLocalLiveSources().filter((item) => item.always)) {
+      for (const src of (await this.loadLocalSources()).filter((item) => item.always)) {
         const rows = parseM3U(src.text, src.name);
         if (rows.length) {
           entries.push(...rows);
@@ -448,7 +455,7 @@ export class LiveCollector {
     let allRemoteDown = false;
     if (entries.length === remoteBase && !this.disableLocal) {
       allRemoteDown = true;
-      for (const src of readLocalLiveSources().filter((item) => !item.always)) {
+      for (const src of (await this.loadLocalSources()).filter((item) => !item.always)) {
         const rows = parseM3U(src.text, src.name);
         if (rows.length) {
           entries.push(...rows);

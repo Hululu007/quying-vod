@@ -10,10 +10,17 @@
   "scripts": {
     "start": "node server.mjs",
     "live:refresh": "node tools/refresh-live-sources.mjs",
-    "live:refresh:dry": "node tools/refresh-live-sources.mjs --dry-run"
+    "live:refresh:dry": "node tools/refresh-live-sources.mjs --dry-run",
+    "cf:assets": "node tools/sync-cf-assets.mjs",
+    "cf:dev": "npm run cf:assets && wrangler dev",
+    "cf:deploy": "npm run cf:assets && wrangler deploy"
   },
   "license": "MIT",
   "dependencies": {
+    "@noble/hashes": "^1.8.0",
     "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "wrangler": "^4.168.0"
   }
 }

@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import Database from './sqlite-compat.mjs';
+import { hashPassword, verifyPassword } from './password.mjs';
 
 const DEFAULT_SETTINGS = {
   site_name: '趣影',
@@ -59,21 +60,6 @@ function assessCard(row, nowMs) {
     expiresAt: exp,
     fresh: row.used_at == null,
   };
-}
-
-function hashPassword(password) {
-  const salt = crypto.randomBytes(16).toString('hex');
-  const hash = crypto.scryptSync(String(password), salt, 64).toString('hex');
-  return `scrypt$${salt}$${hash}`;
-}
-
-function verifyPassword(password, stored) {
-  const parts = String(stored || '').split('$');
-  if (parts.length !== 3 || parts[0] !== 'scrypt') return false;
-  const [, salt, hash] = parts;
-  const expected = Buffer.from(hash, 'hex');
-  const candidate = crypto.scryptSync(String(password), salt, 64);
-  return candidate.length === expected.length && crypto.timingSafeEqual(candidate, expected);
 }
 
 function tokenHash(token) {

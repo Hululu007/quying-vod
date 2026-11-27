@@ -1,2 +1,5 @@
 .vercel
 .env*
+.wrangler
+.dev.vars
+/public/assets
