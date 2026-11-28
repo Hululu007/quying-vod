@@ -2135,12 +2135,14 @@ const PLAY_URL_CACHE = new Map();
 const PLAY_URL_CACHE_TTL = 5 * 60 * 1000;
 const PLAY_URL_INFLIGHT = new Map();
 
-async function resolvePlayback(id, seq) {
+async function resolvePlayback(id, seq, refresh = false) {
   const key = `${id}:${seq}`;
-  const hit = PLAY_URL_CACHE.get(key);
-  if (hit && Date.now() - hit.ts < PLAY_URL_CACHE_TTL) return hit.value;
-  const pending = PLAY_URL_INFLIGHT.get(key);
-  if (pending) return pending;
+  if (!refresh) {
+    const hit = PLAY_URL_CACHE.get(key);
+    if (hit && Date.now() - hit.ts < PLAY_URL_CACHE_TTL) return hit.value;
+    const pending = PLAY_URL_INFLIGHT.get(key);
+    if (pending) return pending;
+  }
   const task = (async () => {
     const row = await detailForPlay(id);
     const isFourk = id.startsWith('4kcz-');
@@ -2984,6 +2986,8 @@ async function handleRequest(req, res) {
   if (p === '/play.m3u8' || p === '/resolve') {
     const id = String(url.searchParams.get('id') || '').trim();
     const seq = String(url.searchParams.get('p') || '0').trim();
+    // r=1 表示客户端播放失败后的强制重解析：跳过 5 分钟地址缓存，重新向采集源取一次。
+    const refresh = url.searchParams.get('r') === '1';
     if (!PLAY_ID_RE.test(id) || !/^\d{1,5}$/.test(seq)) {
       sendJson(res, 400, { ok: false, error: 'id/p required' });
       return;
@@ -2999,7 +3003,7 @@ async function handleRequest(req, res) {
     };
     let resolved;
     try {
-      resolved = await resolvePlayback(id, Number(seq));
+      resolved = await resolvePlayback(id, Number(seq), refresh);
       if (resolved.media.protocol !== 'https:' && resolved.media.protocol !== 'http:') throw new Error('bad media protocol');
     } catch (error) {
       fail(error.status || 502, error);

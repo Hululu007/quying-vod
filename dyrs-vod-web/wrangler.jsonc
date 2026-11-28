@@ -24,6 +24,8 @@
   "vars": {
     "VOD_PAGE_SIZE": "40",
     "UPSTREAM_TIMEOUT_MS": "5000",
-    "LIVE_WARMUP": "1"
+    // Workers 有 CPU 上限（1102），启动即预热直播源会撞限额，改由首次请求懒加载。
+    "LIVE_WARMUP": "0",
+    "LIVE_COLD_WAIT_MS": "3000"
   }
 }
