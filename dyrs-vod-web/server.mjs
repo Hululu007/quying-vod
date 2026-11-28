@@ -2856,6 +2856,13 @@ async function handleRequest(req, res) {
       ts: Date.now(),
       store: storeBackend,
       storeError: storeInitError.slice(0, 160),
+      dbProbe: await (async () => {
+        if (!STORES.catalogStore) return 'none';
+        try {
+          const q = await STORES.catalogStore.getQuery(listCacheKey({ pg: 1 }));
+          return q ? `rows=${q.value.list.length} stale=${q.stale}` : 'miss';
+        } catch (error) { return `err:${String((error && error.message) || error).slice(0, 80)}`; }
+      })(),
       hasDbEnv: Boolean(process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.POSTGRES_URL_NON_POOLING || (process.env.PGHOST && process.env.PGUSER)),
       disableDb: String(process.env.DISABLE_DB || ''),
       dbHost: String((process.env.DATABASE_URL || process.env.POSTGRES_URL || '').replace(/:.+@/, ':***@')).slice(0, 60),      cacheTtl: { list: TTL.list, detail: TTL.detail },
