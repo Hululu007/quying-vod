@@ -217,22 +217,35 @@ function writeBody(res, status, headers, body) {
 }
 
 // 公共只读响应：交给 Vercel 边缘 CDN 缓存，s-maxage 内不回源，降低冷启动与跨境延迟。
-function sendJsonCacheable(res, status, data, { maxAge = 30, sMaxAge = 300, stale = 1800 } = {}) {
+function sendJsonCacheable(res, status, data, { maxAge = 30, sMaxAge = 900, stale = 7200 } = {}) {
   // 授权模式下缩短边缘缓存：卡密可能已过期，避免边缘仍命中旧的 200 响应。
   if (REQUIRE_CARD) {
     sMaxAge = Math.min(sMaxAge, 60);
     stale = Math.min(stale, 120);
   }
   const body = Buffer.from(JSON.stringify(data));
-  writeBody(res, status, {
-    'Content-Type': 'application/json; charset=utf-8',
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+  // 同一份内容固定同一枚弱 ETag：电视端重复进入列表/详情可拿到 304，既省流量也省解码。
+  const etag = `W/"${body.length.toString(16)}-${crypto.createHash('sha1').update(body).digest('base64url').slice(0, 16)}"`;
+  const cacheHeaders = {
+    ETag: etag,
     'Cache-Control': `public, max-age=${maxAge}, s-maxage=${sMaxAge}, stale-while-revalidate=${stale}`,
     // Vercel 边缘会消费并剥掉 Cache-Control 里的 s-maxage / stale-while-revalidate 再转发，
     // 导致下游 Cloudflare 看不到缓存指令（cf-cache-status 一直是 DYNAMIC）。
     // 用 Cloudflare 专用头让 CF 边缘也缓存，且不影响浏览器与 Vercel 自身缓存。
     'Cloudflare-CDN-Cache-Control': `max-age=${sMaxAge}, stale-while-revalidate=${stale}`,
+  };
+  const req = res.req;
+  const inm = String((req && req.headers && req.headers['if-none-match']) || '');
+  if (inm && inm.split(',').some((token) => token.trim() === etag)) {
+    res.writeHead(304, { ...cacheHeaders, 'Access-Control-Allow-Origin': '*', Vary: 'Accept-Encoding' });
+    res.end();
+    return;
+  }
+  writeBody(res, status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    ...cacheHeaders,
   }, body);
 }
 
@@ -893,29 +906,40 @@ async function fetchFourkList({ pg, t }) {
     const list = [];
     let totalPagecount = 1;
     let totalAll = 0;
+    const jobs = [];
     for (const basePath of paths) {
       for (let i = 0; i < pagesNeeded; i += 1) {
         const upPage = upstreamStart + i;
-        const path = upPage > 1 ? `${basePath}/page/${upPage}` : basePath;
-        try {
-          const html = await fourkFetch(baseHost, path, deadline);
-          const parsed = parseFourkListing(html, baseHost, { page: upPage, path, typeId: cid || '1' });
-          totalPagecount = Math.max(totalPagecount, parsed.pagecount || 1);
-          totalAll += Number(parsed.total) || 0;
-          for (const row of (Array.isArray(parsed.list) ? parsed.list : [])) {
-            if (seen.has(row.vod_id)) continue;
-            seen.add(row.vod_id);
-            if (cid) { row.type_id = cid; row.type_name = categoryName(cid); }
-            list.push(row);
-          }
-        } catch (e) {
-          console.warn(`[quying] 4K page ${path} failed: ${String(e && e.message || e)}`);
-          // One bad upstream page is tolerable; if we collected any rows, keep going.
-          // Only re-throw when we have nothing and should try the next mirror.
-          if (list.length === 0) throw e;
-        }
+        jobs.push({ upPage, path: upPage > 1 ? `${basePath}/page/${upPage}` : basePath });
       }
     }
+    // 4K 站是 HTML 页面，逐页串行时每页都要单独等往返；两页并行足以减半首屏等待。
+    const parsedPages = new Array(jobs.length).fill(null);
+    await runLimited(jobs, 2, async (job) => {
+      const index = jobs.indexOf(job);
+      try {
+        parsedPages[index] = parseFourkListing(
+          await fourkFetch(baseHost, job.path, deadline),
+          baseHost,
+          { page: job.upPage, path: job.path, typeId: cid || '1' },
+        );
+      } catch (e) {
+        console.warn(`[quying] 4K page ${job.path} failed: ${String(e && e.message || e)}`);
+      }
+    });
+    for (const parsed of parsedPages) {
+      if (!parsed) continue;
+      totalPagecount = Math.max(totalPagecount, parsed.pagecount || 1);
+      totalAll += Number(parsed.total) || 0;
+      for (const row of (Array.isArray(parsed.list) ? parsed.list : [])) {
+        if (seen.has(row.vod_id)) continue;
+        seen.add(row.vod_id);
+        if (cid) { row.type_id = cid; row.type_name = categoryName(cid); }
+        list.push(row);
+      }
+    }
+    // 全部页面都抓失败时向上抛出，交给镜像切换逻辑处理。
+    if (!list.length && jobs.length) throw new Error('4K list pages unavailable');
     return {
       page,
       pagecount: Math.max(1, Math.floor(totalPagecount / pagesNeeded)),
@@ -941,6 +965,24 @@ async function fetchFourkDetail(id) {
     const html = await fourkFetch(baseHost, `/movie/${match[1]}.html`, deadline);
     return parseFourkDetail(html, baseHost, id);
   });
+}
+
+// 上游每个镜像都有排队间隔，串行叠加会让首屏多等好几秒；这里限定并发跑完一批请求。
+async function runLimited(items, limit, worker) {
+  if (!items.length) return;
+  const size = Math.max(1, Math.min(limit || 1, items.length));
+  let cursor = 0;
+  const runners = [];
+  for (let i = 0; i < size; i += 1) {
+    runners.push((async () => {
+      while (cursor < items.length) {
+        const item = items[cursor];
+        cursor += 1;
+        await worker(item);
+      }
+    })());
+  }
+  await Promise.all(runners);
 }
 
 function parsePage(value) {
@@ -1015,17 +1057,17 @@ async function fetchBfzyList({ pg, t, year, withPlay }) {
     }
   }
 
+  const jobs = [];
   if (macTypes && macTypes.length) {
     for (const typeNum of macTypes) {
-      for (let i = 0; i < pagesNeeded; i += 1) {
-        await mergeOnePage(typeNum, upstreamStart + i);
-      }
+      for (let i = 0; i < pagesNeeded; i += 1) jobs.push([typeNum, upstreamStart + i]);
     }
   } else {
-    for (let i = 0; i < pagesNeeded; i += 1) {
-      await mergeOnePage(null, upstreamStart + i);
-    }
+    for (let i = 0; i < pagesNeeded; i += 1) jobs.push([null, upstreamStart + i]);
   }
+  // 一个分类可能要抓 2 页 × 多个子分类，串行时每页都要等满排队间隔 + 网络往返。
+  // 上游按域名排队，这里并发 4 个只是把等待重叠起来，不会突破镜像的节奏。
+  await runLimited(jobs, 4, ([typeNum, upPage]) => mergeOnePage(typeNum, upPage));
 
   merged.sort((a, b) => String(b.vod_time || '').localeCompare(String(a.vod_time || '')));
   const list = merged.slice(0, PAGE_SIZE);
@@ -1416,10 +1458,14 @@ async function fetchRankedListUpstream(kind, pg, withPlay, year) {
   const ac = kind === 'hot' ? 'detail' : 'list';
   const all = [];
   const seen = new Set();
-  for (let p = 1; p <= RANK_SOURCE_PAGES; p += 1) {
+  // 榜单回退要扫多页上游，串行等于把每页的排队间隔叠起来；并发着色但保持页序稳定。
+  const pageNos = Array.from({ length: RANK_SOURCE_PAGES }, (_, i) => i + 1);
+  const pages = await Promise.all(pageNos.map((p) => {
     const params = { ac, pg: p };
     if (y) params.year = y;
-    const data = await upstreamJson(params, TTL.list).catch(() => null);
+    return upstreamJson(params, TTL.list).catch(() => null);
+  }));
+  for (const data of pages) {
     if (!data) continue;
     for (const item of (Array.isArray(data.list) ? data.list : [])) {
       const key = String(item.vod_id || '');
@@ -2767,7 +2813,7 @@ async function handleRequest(req, res) {
       const payload = await publicListPayload(data, publicBase(req), false, { manual: false, t: cfg.ourType || undefined });
       payload.source = 'recommend';
       payload.section = section;
-      sendJsonCacheable(res, 200, payload, { sMaxAge: 300 });
+      sendJsonCacheable(res, 200, payload, { sMaxAge: 900 });
       return;
     } catch {
       try {
@@ -2780,7 +2826,7 @@ async function handleRequest(req, res) {
         );
         payload.source = 'fallback';
         payload.section = section;
-        sendJsonCacheable(res, 200, payload, { sMaxAge: 300 });
+        sendJsonCacheable(res, 200, payload, { sMaxAge: 900 });
         return;
       } catch (error) {
         sendJson(res, 502, { ok: false, error: (error && error.message) || 'recommendation unavailable' });
@@ -2793,7 +2839,7 @@ async function handleRequest(req, res) {
     sendJsonCacheable(res, 200, {
       code: 1,
       list: CHANNELS.map(({ id, name, icon, desc, kind }) => ({ id, name, icon, desc, kind })),
-    }, { sMaxAge: 300 });
+    }, { sMaxAge: 900 });
     return;
   }
 
@@ -2838,14 +2884,14 @@ async function handleRequest(req, res) {
         sendJsonCacheable(res, 200, await publicListPayload(data, base, false, {
           t: url.searchParams.get('t'),
           year: parseYear(url.searchParams.get('year')),
-        }), { sMaxAge: 300 });
+        }), { sMaxAge: 900 });
         return;
       }
       if (p === '/api/vod/search') {
         const wd = (url.searchParams.get('wd') || '').trim();
         if (!wd) { sendJson(res, 400, { ok: false, error: 'wd is required' }); return; }
         const data = await fetchSearch(wd.slice(0, 60), url.searchParams.get('pg'));
-        sendJsonCacheable(res, 200, await publicListPayload(data, base, false, { wd }), { sMaxAge: 300 });
+        sendJsonCacheable(res, 200, await publicListPayload(data, base, false, { wd }), { sMaxAge: 900 });
         return;
       }
       const ids = (url.searchParams.get('ids') || '').trim();
@@ -2854,7 +2900,7 @@ async function handleRequest(req, res) {
         return;
       }
       const rows = await fetchDetail(ids);
-      sendJsonCacheable(res, 200, await publicDetailPayload(rows, base, true), { sMaxAge: 600 });
+      sendJsonCacheable(res, 200, await publicDetailPayload(rows, base, true), { sMaxAge: 1800 });
       return;
     } catch (e) {
       sendJson(res, 502, { code: 0, msg: String(e.message || e), list: [] });
@@ -2870,12 +2916,12 @@ async function handleRequest(req, res) {
     try {
       if (ac === 'detail' && /^(?:(?:\d{1,10}|4kcz-\d{1,8})|manual-[a-z0-9]{4,24})(?:,(?:(?:\d{1,10}|4kcz-\d{1,8})|manual-[a-z0-9]{4,24})){0,19}$/.test(ids)) {
         const rows = await fetchDetail(ids);
-        sendJsonCacheable(res, 200, await publicDetailPayload(rows, base, true), { sMaxAge: 600 });
+        sendJsonCacheable(res, 200, await publicDetailPayload(rows, base, true), { sMaxAge: 1800 });
         return;
       }
       if (ac === 'detail' && wd) {
         const data = await fetchSearch(wd.slice(0, 60), url.searchParams.get('pg'), true);
-        sendJsonCacheable(res, 200, await publicListPayload(data, base, true, { wd }), { sMaxAge: 300 });
+        sendJsonCacheable(res, 200, await publicListPayload(data, base, true, { wd }), { sMaxAge: 900 });
         return;
       }
       if (ac === 'detail') {
@@ -2888,7 +2934,7 @@ async function handleRequest(req, res) {
         sendJsonCacheable(res, 200, await publicListPayload(data, base, true, {
           t: url.searchParams.get('t'),
           year: parseYear(url.searchParams.get('year')),
-        }), { sMaxAge: 300 });
+        }), { sMaxAge: 900 });
         return;
       }
       const data = await fetchList({
@@ -2899,7 +2945,7 @@ async function handleRequest(req, res) {
       sendJsonCacheable(res, 200, await publicListPayload(data, base, false, {
         t: url.searchParams.get('t'),
         year: parseYear(url.searchParams.get('year')),
-      }), { sMaxAge: 300 });
+      }), { sMaxAge: 900 });
       return;
     } catch (e) {
       sendJson(res, 502, { code: 0, msg: String(e.message || e), list: [], class: CLASSES });
