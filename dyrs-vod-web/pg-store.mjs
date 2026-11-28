@@ -333,7 +333,7 @@ export class PgCatalogStore {
     const conn = await this.pool.connect();
     try {
       await conn.query('BEGIN');
-      for (const row of list) await this._saveVodConn(conn, row, ttl, time);
+      await this._saveVodsConn(conn, list, ttl, time);
       await conn.query(
         `INSERT INTO queries (query_key, kind, page, pagecount, total, ids_json, fetched_at, expires_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -356,40 +356,45 @@ export class PgCatalogStore {
     }
   }
 
-  async _saveVodConn(conn, row, ttl, time) {
-    const id = text(row && row.vod_id);
-    if (!id) return;
-    const prev = await conn.query('SELECT * FROM vods WHERE vod_id = $1', [id]);
-    const previous = prev.rows[0];
-    const previousPayload = previous ? JSON.parse(previous.payload_json) : {};
-    const previousEpisodes = previous ? JSON.parse(previous.episodes_json) : [];
-    const incoming = cleanPayload(row);
-    const payload = { ...previousPayload };
-    for (const [key, value] of Object.entries(incoming)) {
-      if (hasValue(value) || !hasValue(payload[key])) payload[key] = value;
+  // 一次 INSERT ... 批量写入整页条目，避免每条两次往返（Neon/跨区时延敏感）。
+  // payload 用 jsonb 合并，episodes 只在有新数据时覆盖，过期时间取较大值。
+  async _saveVodsConn(conn, list, ttl, time) {
+    const rows = [];
+    for (const row of list) {
+      const id = text(row && row.vod_id);
+      if (!id) continue;
+      const payload = cleanPayload(row);
+      const name = text(payload.vod_name);
+      const episodes = episodeGroups(row.vod_play_url);
+      const detailReady = Boolean(episodes.length || (row.vod_content && row.vod_year));
+      rows.push([
+        id,
+        id.startsWith('4kcz-') ? '4kcz' : id.startsWith('mo-') ? 'modu' : 'bfzy',
+        name, nameKey(name),
+        text(payload.type_id), text(payload.vod_year), text(payload.vod_area),
+        JSON.stringify(payload), JSON.stringify(episodes), detailReady ? 1 : 0,
+        time, time + ttl,
+      ]);
     }
-    const episodes = episodeGroups(row.vod_play_url);
-    const storedEpisodes = episodes.length ? episodes : previousEpisodes;
-    const detailReady = Boolean(
-      (previous && previous.detail_ready) || storedEpisodes.length || (row.vod_content && row.vod_year),
-    );
-    const name = text(payload.vod_name);
-    const expiresAt = detailReady && previous && previous.detail_ready && !episodes.length
-      ? Math.max(previous.expires_at, time + ttl)
-      : time + ttl;
+    if (!rows.length) return;
+    const params = [];
+    const tuples = rows.map((row, index) => {
+      const offset = index * row.length;
+      for (const value of row) params.push(value);
+      return `(${row.map((_, i) => `$${offset + i + 1}`).join(', ')})`;
+    });
     await conn.query(
       `INSERT INTO vods (vod_id, source, name, name_key, type_id, year, area, payload_json, episodes_json, detail_ready, fetched_at, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+       VALUES ${tuples.join(', ')}
        ON CONFLICT (vod_id) DO UPDATE SET
          source = EXCLUDED.source, name = EXCLUDED.name, name_key = EXCLUDED.name_key,
          type_id = EXCLUDED.type_id, year = EXCLUDED.year, area = EXCLUDED.area,
-         payload_json = EXCLUDED.payload_json, episodes_json = EXCLUDED.episodes_json,
-         detail_ready = EXCLUDED.detail_ready, fetched_at = EXCLUDED.fetched_at, expires_at = EXCLUDED.expires_at`,
-      [
-        id, id.startsWith('4kcz-') ? '4kcz' : 'bfzy', name, nameKey(name),
-        text(payload.type_id), text(payload.vod_year), text(payload.vod_area),
-        JSON.stringify(payload), JSON.stringify(storedEpisodes), detailReady ? 1 : 0, time, expiresAt,
-      ],
+         payload_json = ((vods.payload_json::jsonb || EXCLUDED.payload_json::jsonb)::text),
+         episodes_json = CASE WHEN EXCLUDED.episodes_json = '[]' THEN vods.episodes_json ELSE EXCLUDED.episodes_json END,
+         detail_ready = GREATEST(vods.detail_ready, EXCLUDED.detail_ready),
+         fetched_at = EXCLUDED.fetched_at,
+         expires_at = GREATEST(vods.expires_at, EXCLUDED.expires_at)`,
+      params,
     );
   }
 
@@ -398,15 +403,21 @@ export class PgCatalogStore {
     const query = rows[0];
     if (!query) return null;
     const ids = JSON.parse(query.ids_json);
+    const stale = query.expires_at <= Date.now();
+    if (!ids.length) {
+      return { stale, value: { page: query.page, pagecount: query.pagecount, total: query.total, list: [] } };
+    }
+    // 一次取回整页，替代逐条 SELECT（40 条会放大成 40 次往返）。
+    const vrows = await this._q('SELECT * FROM vods WHERE vod_id = ANY($1::text[])', [ids]);
+    const byId = new Map(vrows.map((v) => [v.vod_id, v]));
     const list = [];
     for (const id of ids) {
-      const vrows = await this._q('SELECT * FROM vods WHERE vod_id = $1', [id]);
-      const v = vrows[0];
+      const v = byId.get(id);
       if (!v) return null;
       list.push(rowToVod(v));
     }
     return {
-      stale: query.expires_at <= Date.now(),
+      stale,
       value: { page: query.page, pagecount: query.pagecount, total: query.total, list },
     };
   }

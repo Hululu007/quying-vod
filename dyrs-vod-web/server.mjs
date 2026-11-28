@@ -139,8 +139,10 @@ const IMAGE_PROXY_ENABLED = ENV.DISABLE_IMAGE_PROXY !== '1';
 const PIC_KEYS = new Set(['vod_pic', 'vod_pic_slide', 'vod_pic_thumb']);
 const CN_NUM = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十'];
 const TTL = {
-  list: Math.max(60000, Number(ENV.UPSTREAM_LIST_TTL_MS) || 900000),
-  detail: Math.max(60000, Number(ENV.UPSTREAM_DETAIL_TTL_MS) || 1800000),
+  // 采集结果落库更久：列表 60 分钟、详情 12 小时。上游魔都的剧集与地址都很稳定，
+  // 前端刷新不必每次回源；优先用 UPSTREAM_*_TTL_MS 覆盖。
+  list: Math.max(60000, Number(ENV.UPSTREAM_LIST_TTL_MS) || 3600000),
+  detail: Math.max(60000, Number(ENV.UPSTREAM_DETAIL_TTL_MS) || 43200000),
   tvbox: 3600000,
 };
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
@@ -2027,14 +2029,22 @@ async function fetchGuessPool(seeds, exclude) {
 }
 
 // Fetch a single detail record for playback resolution without crossing ID schemes.
+// 先吃数据库里 12 小时有效的详情（含全集地址），命中就不回采集源。
 async function detailForPlay(id) {
+  const key = `detail:${id}`;
+  const cached = await readCatalogQuery(key);
+  if (cached && !cached.stale) {
+    const row = (Array.isArray(cached.value && cached.value.list) ? cached.value.list : [])
+      .find((item) => String(item.vod_id) === String(id));
+    if (row) return row;
+  }
   const row = /^4kcz-\d{1,8}$/.test(id)
     ? await fetchFourkDetail(id)
     : MODU_ID_RE.test(id)
       ? (await fetchModuDetail([id])).find((item) => String(item.vod_id) === String(id)) || null
       : (await fetchBfzyDetail(id)).find((item) => String(item.vod_id) === String(id)) || null;
   // 采集到的详情同样回写数据库，供后续 ac=detail 直接命中。
-  if (row) await saveCatalogQuery(`detail:${id}`, { page: 1, pagecount: 1, total: 1, list: [row] }, TTL.detail);
+  if (row) await saveCatalogQuery(key, { page: 1, pagecount: 1, total: 1, list: [row] }, TTL.detail);
   return row;
 }
 
@@ -2132,7 +2142,7 @@ async function resolveFourkMedia(ep) {
 
 // 播放地址短时内存缓存：同一集 5 分钟内复用已解析结果，避免重复回源采集（不入库，符合短期有效约束）。
 const PLAY_URL_CACHE = new Map();
-const PLAY_URL_CACHE_TTL = 5 * 60 * 1000;
+const PLAY_URL_CACHE_TTL = 30 * 60 * 1000;
 const PLAY_URL_INFLIGHT = new Map();
 
 async function resolvePlayback(id, seq, refresh = false) {
@@ -3038,7 +3048,11 @@ async function handleRequest(req, res) {
     }
     res.writeHead(302, {
       Location: media.toString(),
-      'Cache-Control': 'public, max-age=30, s-maxage=300, stale-while-revalidate=1800',
+      // 同一集的解析地址在魔都侧很稳定，边缘缓存 1 小时，避免每次开播都回源解析。
+      // r=1（客户端强刷）不缓存，保证拿到最新地址。
+      'Cache-Control': refresh
+        ? 'no-store'
+        : 'public, max-age=600, s-maxage=3600, stale-while-revalidate=7200',
       'Access-Control-Allow-Origin': '*',
     });
     res.end();
@@ -3056,7 +3070,7 @@ async function handleRequest(req, res) {
       const payload = await publicListPayload(data, publicBase(req), false, { manual: false, t: cfg.ourType || undefined });
       payload.source = 'recommend';
       payload.section = section;
-      sendJsonCacheable(res, 200, payload, { sMaxAge: 900 });
+      sendJsonCacheable(res, 200, payload, { sMaxAge: 1800 });
       return;
     } catch {
       try {
@@ -3069,7 +3083,7 @@ async function handleRequest(req, res) {
         );
         payload.source = 'fallback';
         payload.section = section;
-        sendJsonCacheable(res, 200, payload, { sMaxAge: 900 });
+        sendJsonCacheable(res, 200, payload, { sMaxAge: 1800 });
         return;
       } catch (error) {
         sendJson(res, 502, { ok: false, error: (error && error.message) || 'recommendation unavailable' });
@@ -3082,7 +3096,7 @@ async function handleRequest(req, res) {
     sendJsonCacheable(res, 200, {
       code: 1,
       list: CHANNELS.map(({ id, name, icon, desc, kind }) => ({ id, name, icon, desc, kind })),
-    }, { sMaxAge: 900 });
+    }, { sMaxAge: 1800 });
     return;
   }
 
@@ -3127,14 +3141,14 @@ async function handleRequest(req, res) {
         sendJsonCacheable(res, 200, await publicListPayload(data, base, false, {
           t: url.searchParams.get('t'),
           year: parseYear(url.searchParams.get('year')),
-        }), { sMaxAge: 900 });
+        }), { sMaxAge: 1800 });
         return;
       }
       if (p === '/api/vod/search') {
         const wd = (url.searchParams.get('wd') || '').trim();
         if (!wd) { sendJson(res, 400, { ok: false, error: 'wd is required' }); return; }
         const data = await fetchSearch(wd.slice(0, 60), url.searchParams.get('pg'));
-        sendJsonCacheable(res, 200, await publicListPayload(data, base, false, { wd }), { sMaxAge: 900 });
+        sendJsonCacheable(res, 200, await publicListPayload(data, base, false, { wd }), { sMaxAge: 1800 });
         return;
       }
       const ids = (url.searchParams.get('ids') || '').trim();
@@ -3143,7 +3157,7 @@ async function handleRequest(req, res) {
         return;
       }
       const rows = await fetchDetail(ids);
-      sendJsonCacheable(res, 200, await publicDetailPayload(rows, base, true), { sMaxAge: 1800 });
+      sendJsonCacheable(res, 200, await publicDetailPayload(rows, base, true), { sMaxAge: 3600 });
       return;
     } catch (e) {
       sendJson(res, 502, { code: 0, msg: String(e.message || e), list: [] });
@@ -3159,12 +3173,12 @@ async function handleRequest(req, res) {
     try {
       if (ac === 'detail' && ID_LIST_RE.test(ids)) {
         const rows = await fetchDetail(ids);
-        sendJsonCacheable(res, 200, await publicDetailPayload(rows, base, true), { sMaxAge: 1800 });
+        sendJsonCacheable(res, 200, await publicDetailPayload(rows, base, true), { sMaxAge: 3600 });
         return;
       }
       if (ac === 'detail' && wd) {
         const data = await fetchSearch(wd.slice(0, 60), url.searchParams.get('pg'), true);
-        sendJsonCacheable(res, 200, await publicListPayload(data, base, true, { wd }), { sMaxAge: 900 });
+        sendJsonCacheable(res, 200, await publicListPayload(data, base, true, { wd }), { sMaxAge: 1800 });
         return;
       }
       if (ac === 'detail') {
@@ -3177,7 +3191,7 @@ async function handleRequest(req, res) {
         sendJsonCacheable(res, 200, await publicListPayload(data, base, true, {
           t: url.searchParams.get('t'),
           year: parseYear(url.searchParams.get('year')),
-        }), { sMaxAge: 900 });
+        }), { sMaxAge: 1800 });
         return;
       }
       const data = await fetchList({
@@ -3188,7 +3202,7 @@ async function handleRequest(req, res) {
       sendJsonCacheable(res, 200, await publicListPayload(data, base, false, {
         t: url.searchParams.get('t'),
         year: parseYear(url.searchParams.get('year')),
-      }), { sMaxAge: 900 });
+      }), { sMaxAge: 1800 });
       return;
     } catch (e) {
       sendJson(res, 502, { code: 0, msg: String(e.message || e), list: [], class: CLASSES });
