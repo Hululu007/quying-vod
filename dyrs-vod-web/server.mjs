@@ -32,6 +32,8 @@ async function initNodeStores() {
     const stores = await initStores({ initialPassword: ENV.ADMIN_PASSWORD, moduleDir: __dirname, env: ENV });
     rootCatalogStore = stores.catalogStore;
     rootAdminStore = stores.adminStore;
+    storeBackend = stores.backend || 'unknown';
+    storeInitError = '';
     if (stores.backend === 'postgres') {
       console.log('[quying] using external PostgreSQL for persistence');
     } else {
@@ -2849,7 +2851,8 @@ async function handleRequest(req, res) {
     sendJsonCacheable(res, 200, {
       ok: true,
       ts: Date.now(),
-      store: (STORES && STORES.backend) || 'none',
+      store: storeBackend,
+      storeError: storeInitError.slice(0, 160),
       hasDbEnv: Boolean(process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.POSTGRES_URL_NON_POOLING || (process.env.PGHOST && process.env.PGUSER)),
       disableDb: String(process.env.DISABLE_DB || ''),
       dbHost: String((process.env.DATABASE_URL || process.env.POSTGRES_URL || '').replace(/:.+@/, ':***@')).slice(0, 60),      cacheTtl: { list: TTL.list, detail: TTL.detail },
@@ -3331,4 +3334,5 @@ if (!isWorkers) {
     console.error('[quying] unhandledRejection:', (e && e.message) || e);
   });
 }
+
 
