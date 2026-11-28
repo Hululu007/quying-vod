@@ -55,6 +55,18 @@ const UPSTREAM_HOSTS = (ENV.VOD_UPSTREAM_HOST || 'https://bfzy1.tv,https://bfzy2
   .split(',')
   .map((host) => host.trim().replace(/\/+$/, ''))
   .filter(Boolean);
+// 主采集源：魔都资源（MacCMS JSON）。暴风站 bfzy1~5 自 2026-11 起全量播放地址失效
+// （vod_play_url 里的 CDN 全部 404），只保留作元数据兜底。魔都实测 m3u8 可播。
+// 逗号分隔 MODU_UPSTREAM_HOST 可覆盖；mo- 前缀用于区分暴风数字 id 空间。
+const MODU_HOSTS = (ENV.MODU_UPSTREAM_HOST || 'https://caiji.moduapi.cc')
+  .split(',')
+  .map((host) => host.trim().replace(/\/+$/, ''))
+  .filter(Boolean);
+const MODU_ID_PREFIX = 'mo-';
+const MODU_ID_RE = /^mo-\d{1,10}$/;
+const ID_TOKEN = '(?:\\d{1,10}|4kcz-\\d{1,8}|mo-\\d{1,10})';
+const ID_LIST_RE = new RegExp(`^(?:(?:${ID_TOKEN})|manual-[a-z0-9]{4,24})(?:,(?:(?:${ID_TOKEN})|manual-[a-z0-9]{4,24})){0,19}$`);
+const PLAY_ID_RE = new RegExp(`^(?:${ID_TOKEN})$`);
 const FOURKCZ_HOSTS = (ENV.FOURKCZ_UPSTREAM_HOST || 'https://www.4kcz.com,https://4kcz.com,https://czzy.top,https://cz4k.com')
   .split(',')
   .map((host) => host.trim().replace(/\/+$/, ''))
@@ -169,6 +181,7 @@ const IMAGE_HOST_RES = [
   /(^|\.)tupian\.click$/i,
   /(^|\.)zbds\.top$/i,
   /(^|\.)gitee\.com$/i,
+  /(^|\.)mdzypic\.com$/i,
 ];
 
 const MIME = {
@@ -332,6 +345,8 @@ function firstGroupUrl(v, base) {
 }
 
 async function counterpartUrl(v, base) {
+  // 魔都条目本身就是可播的，跨源「第二线路」对暴风已无意义（暴风地址全站 404）。
+  if (MODU_ID_RE.test(String(v.vod_id || ''))) return '';
   const isFourk = String(v.vod_id || '').startsWith('4kcz-');
   const name = String(v.vod_name || '').trim();
   const want = name.toLowerCase();
@@ -643,6 +658,119 @@ async function upstreamJson(params, ttl) {
   } finally {
     inflightJson.delete(cacheKey);
   }
+}
+
+// 魔都资源（主源）的 JSON 抓取，结构与暴风一致，独立缓存键避免串味。
+async function moduJson(params, ttl) {
+  const qs = buildQuery(params);
+  const cacheKey = `modu:${qs}`;
+  const now = Date.now();
+  const hit = jsonCache.get(cacheKey);
+  if (hit && hit.expires > now) return hit.value;
+  const running = inflightJson.get(cacheKey);
+  if (running) return running;
+
+  const task = (async () => {
+    let lastError = null;
+    for (const baseHost of MODU_HOSTS) {
+      if (hostCooling(baseHost)) continue;
+      await hostSlot(baseHost);
+      const r = await httpGetText(`${baseHost}/api.php/provide/vod/?${qs}`, {
+        headers: { 'User-Agent': UA, Accept: 'application/json,*/*', 'Accept-Encoding': 'identity', Referer: `${baseHost}/` },
+        timeout: UPSTREAM_TIMEOUT_MS,
+      });
+      let data = null;
+      if (!r.error && r.status >= 200 && r.status < 300) {
+        try { data = JSON.parse(r.body.toString('utf8')); } catch {}
+      }
+      if (!data || typeof data !== 'object') {
+        lastError = upstreamFailure('modu provider unavailable');
+        coolHost(baseHost, UPSTREAM_COOLDOWN_MS);
+        continue;
+      }
+      if (ttl > 0) {
+        jsonCache.set(cacheKey, { expires: Date.now() + ttl, value: data });
+        if (jsonCache.size > 400) {
+          for (const [k, v] of jsonCache) if (v.expires <= Date.now()) jsonCache.delete(k);
+        }
+      }
+      return data;
+    }
+    throw lastError || new Error('modu provider unavailable');
+  })();
+
+  inflightJson.set(cacheKey, task);
+  try {
+    return await task;
+  } finally {
+    inflightJson.delete(cacheKey);
+  }
+}
+
+// 魔都的分类树和我们（暴风口径）的 id 完全不同，按中文分类名做映射。
+let moduClassCache = null;
+
+async function moduClasses() {
+  const now = Date.now();
+  if (moduClassCache && moduClassCache.expires > now) return moduClassCache.value;
+  const data = await moduJson({ ac: 'list' }, 6 * 60 * 60 * 1000);
+  const classes = (Array.isArray(data.class) ? data.class : []).map((c) => ({
+    id: Number(c.type_id),
+    pid: Number(c.type_pid),
+    name: String(c.type_name || '').trim(),
+  })).filter((c) => Number.isFinite(c.id));
+  const byName = new Map();
+  const byId = new Map();
+  for (const c of classes) {
+    if (c.name && !byName.has(c.name)) byName.set(c.name, c.id);
+    byId.set(c.id, c);
+  }
+  const value = { classes, byName, byId };
+  moduClassCache = { expires: now + 6 * 60 * 60 * 1000, value };
+  return value;
+}
+
+// 我们的一级分类 → 魔都的一级分类名（魔都把动漫拆成多个根，短剧只有 AI 漫剧一路）。
+const MODU_HEADLINE_NAMES = {
+  '1': ['电影'],
+  '2': ['连续剧'],
+  '3': ['综艺'],
+  '4': ['国产动漫', '日韩动漫', '欧美动漫', '港台动漫', '动漫电影'],
+  '5': ['AI漫剧'],
+  '7': ['体育'],
+};
+const MODU_NAME_ALIASES = {
+  短剧: 'AI漫剧',
+  短剧大全: 'AI漫剧',
+  电视剧: '连续剧',
+  动漫片: '国产动漫',
+  记录片: '纪录片',
+};
+// 一级分类只取前若干个子类各 1 页：魔都单请求约 1.2s，枚举全部子类会让冷启动拖到十几秒。
+const MODU_HEADLINE_LEAVES = 4;
+
+async function moduTypeSet(cat) {
+  const { classes, byName } = await moduClasses();
+  if (cat.kind === 'headline') {
+    const roots = (MODU_HEADLINE_NAMES[cat.value] || [])
+      .map((name) => byName.get(name))
+      .filter((id) => Number.isFinite(id));
+    if (!roots.length) throw new Error('modu category unsupported');
+    const ids = new Set(roots);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const c of classes) {
+        if (!ids.has(c.id) && ids.has(c.pid)) { ids.add(c.id); changed = true; }
+      }
+    }
+    return [...ids].sort((a, b) => a - b);
+  }
+  const name = TYPE_NAMES[cat.value] || '';
+  const target = MODU_NAME_ALIASES[name] || name;
+  const id = byName.get(target);
+  if (!Number.isFinite(id)) throw new Error('modu category unsupported');
+  return [id];
 }
 
 const fourkCache = new Map();
@@ -1083,7 +1211,8 @@ async function fetchBfzyList({ pg, t, year, withPlay }) {
 // Slim list rows omit year/area on this provider; fill them from one batch
 // detail call for the visible page.
 async function hydrate(list) {
-  const ids = list.map((v) => String(v.vod_id || '')).filter(Boolean).slice(0, PAGE_SIZE).join(',');
+  // 只有暴风精简列表缺字段需要补抓；魔都取的就是 detail，4K/手动条目也不走这里。
+  const ids = list.map((v) => String(v.vod_id || '')).filter((id) => /^\d{1,10}$/.test(id)).slice(0, PAGE_SIZE).join(',');
   if (!ids) return;
   const data = await upstreamJson({ ac: 'detail', ids }, TTL.list).catch(() => null);
   if (!data || !Array.isArray(data.list)) return;
@@ -1112,6 +1241,11 @@ async function hydrateFourk(list) {
 }
 
 async function fetchListLive({ pg, t, year, withPlay }) {
+  // 主源先行：魔都播放地址可用，分类按中文名映射，支持一级分类和原始子分类。
+  try {
+    const data = await fetchModuList({ pg, t, year, withPlay });
+    if (data && Array.isArray(data.list) && data.list.length) return data;
+  } catch {}
   const cat = categoryParam(t);
   // Raw MacCMS type_ids (sub-categories like 21=动作片) must go to bfzy,
   // because 4K only supports headline categories and cannot filter by sub-type.
@@ -1140,9 +1274,15 @@ async function fetchDetailLive(ids) {
   const idList = String(ids).split(',');
   const bfzyIds = [...new Set(idList.filter((id) => /^\d{1,10}$/.test(id)))];
   const fourkIds = [...new Set(idList.filter((id) => /^4kcz-\d{1,8}$/.test(id)))];
-  if (bfzyIds.length + fourkIds.length !== idList.length) throw new Error('invalid vod id');
+  const moduIds = [...new Set(idList.filter((id) => MODU_ID_RE.test(id)))];
+  if (bfzyIds.length + fourkIds.length + moduIds.length !== idList.length) throw new Error('invalid vod id');
   const byId = new Map();
   const tasks = [];
+  if (moduIds.length) {
+    tasks.push(fetchModuDetail(moduIds).then((rows) => {
+      for (const row of rows) byId.set(String(row.vod_id), row);
+    }));
+  }
   if (bfzyIds.length) {
     tasks.push(fetchBfzyDetail(bfzyIds.join(',')).then((rows) => {
       for (const row of rows) byId.set(String(row.vod_id), row);
@@ -1169,11 +1309,96 @@ async function fetchBfzySearch(wd, pg, withPlay) {
 
 async function fetchSearchLive(wd, pg, withPlay) {
   try {
+    const data = await fetchModuSearch(wd, pg, withPlay);
+    if (data && Array.isArray(data.list) && data.list.length) return data;
+  } catch {}
+  try {
     const data = await fetchFourkSearch(wd, pg);
     if (withPlay) data.list = await hydrateFourk(data.list);
     return data;
   } catch {}
   return fetchBfzySearch(wd, pg, withPlay);
+}
+
+// ---- 魔都资源（主源）----
+// 魔都一页固定 20 条，`ac=detail` 直接带全集播放地址，所以列表也用 detail，省掉二次回源。
+async function fetchModuList({ pg, t, year, withPlay }) {
+  const page = parsePage(pg);
+  const pagesNeeded = Math.max(1, Math.ceil(PAGE_SIZE / UPSTREAM_PAGE_SIZE));
+  const upstreamStart = (page - 1) * pagesNeeded + 1;
+  const cat = categoryParam(t);
+  const types = cat ? await moduTypeSet(cat) : null;
+  const seen = new Set();
+  const merged = [];
+  let total = 0;
+  let upstreamPagecount = 1;
+
+  async function mergeOne(typeNum, upPage) {
+    const params = { ac: 'detail', pg: upPage };
+    if (typeNum != null) params.t = typeNum;
+    if (year) params.year = year;
+    const data = await moduJson(params, TTL.list).catch(() => null);
+    if (!data) return;
+    total += Number(data.total) || 0;
+    upstreamPagecount = Math.max(upstreamPagecount, Number(data.pagecount) || 1);
+    for (const item of (Array.isArray(data.list) ? data.list : [])) {
+      const key = String(item.vod_id || '');
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      merged.push(item);
+    }
+  }
+
+  const jobs = [];
+  if (types && types.length) {
+    const budget = cat.kind === 'headline' ? Math.min(types.length, MODU_HEADLINE_LEAVES) : types.length;
+    const chosen = types.slice(0, budget);
+    const perLeafPages = Math.max(1, Math.ceil(PAGE_SIZE / (UPSTREAM_PAGE_SIZE * chosen.length)));
+    for (const typeNum of chosen) {
+      for (let i = 0; i < perLeafPages; i += 1) jobs.push([typeNum, upstreamStart + i]);
+    }
+  } else {
+    for (let i = 0; i < pagesNeeded; i += 1) jobs.push([null, upstreamStart + i]);
+  }
+  await runLimited(jobs, 4, ([typeNum, upPage]) => mergeOne(typeNum, upPage));
+
+  // 一级分类只取了前几个子类；不够一屏时把其余子类各补一页。
+  if (types && types.length && merged.length < PAGE_SIZE) {
+    const done = new Set(jobs.map(([typeNum]) => typeNum));
+    const extra = types.filter((typeNum) => !done.has(typeNum));
+    if (extra.length) {
+      await runLimited(extra.map((typeNum) => [typeNum, upstreamStart]), 4, ([typeNum, upPage]) => mergeOne(typeNum, upPage));
+    }
+  }
+
+  if (!merged.length) throw new Error('modu list unavailable');
+  merged.sort((a, b) => String(b.vod_time || '').localeCompare(String(a.vod_time || '')));
+  const list = merged.slice(0, PAGE_SIZE).map((v) => ({ ...v, vod_id: `${MODU_ID_PREFIX}${v.vod_id}` }));
+  return {
+    page,
+    pagecount: Math.max(1, Math.floor(upstreamPagecount / pagesNeeded)),
+    total,
+    list,
+  };
+}
+
+async function fetchModuDetail(ids) {
+  const clean = ids.map((id) => String(id).replace(MODU_ID_PREFIX, '')).filter((id) => /^\d{1,10}$/.test(id));
+  if (!clean.length) return [];
+  const data = await moduJson({ ac: 'detail', ids: clean.join(',') }, TTL.detail);
+  const rows = Array.isArray(data.list) ? data.list : [];
+  return rows.map((v) => ({ ...v, vod_id: `${MODU_ID_PREFIX}${v.vod_id}` }));
+}
+
+async function fetchModuSearch(wd, pg, withPlay) {
+  const data = await moduJson({ ac: 'detail', wd, pg: parsePage(pg) }, TTL.list);
+  const list = (Array.isArray(data.list) ? data.list : []).map((v) => ({ ...v, vod_id: `${MODU_ID_PREFIX}${v.vod_id}` }));
+  return {
+    page: parsePage(pg),
+    pagecount: Number(data.pagecount) || 1,
+    total: Number(data.total) || list.length,
+    list,
+  };
 }
 
 let catalogWarningShown = false;
@@ -1263,7 +1488,7 @@ function listCacheKey({ pg, t, year, withPlay } = {}) {
   // 查询键必须用字符串，否则原始二级分类会全部落到同一个 [object Object] 缓存上。
   const cat = categoryParam(t);
   const catKey = cat ? `${cat.kind}:${cat.value}` : '';
-  return `list:v5:${withPlay ? 1 : 0}:${parsePage(pg)}:${PAGE_SIZE}:${catKey}:${parseYear(year)}`;
+  return `list:v6:${withPlay ? 1 : 0}:${parsePage(pg)}:${PAGE_SIZE}:${catKey}:${parseYear(year)}`;
 }
 
 const RANK_KINDS = new Set(['new', 'hot', 'score']);
@@ -1285,9 +1510,9 @@ const DOUBAN_RESOLVE_LIMIT = 100;   // 最多为多少条候选做片名匹配
 const RANK_POOL_LIMIT = 80;         // 榜单池上限，决定可翻页的总条数
 
 // 直接向指定镜像发起一次搜索请求；镜像各自独立排队，并行匹配时可分摊压力。
-async function bfzySearchOnHost(host, wd) {
+async function bfzySearchOnHost(host, wd, isModu = false) {
   await hostSlot(host);
-  const qs = buildQuery({ ac: 'list', wd, pg: 1 });
+  const qs = buildQuery({ ac: isModu ? 'detail' : 'list', wd, pg: 1 });
   const r = await httpGetText(`${host}/api.php/provide/vod/?${qs}`, {
     headers: { 'User-Agent': UA, Accept: 'application/json,*/*', 'Accept-Encoding': 'identity', Referer: `${host}/` },
     timeout: UPSTREAM_TIMEOUT_MS,
@@ -1298,21 +1523,26 @@ async function bfzySearchOnHost(host, wd) {
   }
   let data;
   try { data = JSON.parse(r.body.toString('utf8')); } catch { return null; }
-  return Array.isArray(data && data.list) ? data.list : [];
+  const rows = Array.isArray(data && data.list) ? data.list : [];
+  return isModu ? rows.map((v) => ({ ...v, vod_id: `${MODU_ID_PREFIX}${v.vod_id}` })) : rows;
 }
 
 // 把待匹配的豆瓣标题分摊到各健康镜像上并行搜索，避免串行等满 400ms×N。
+// 主源（魔都）的条目带着可播地址，优先在它这里找片；暴风只在魔都没命中时补位。
 async function searchTitlesOnHosts(candidates, out) {
-  const hosts = UPSTREAM_HOSTS.filter((h) => !hostCooling(h));
+  const moduHosts = MODU_HOSTS.filter((h) => !hostCooling(h));
+  const bfzyHosts = UPSTREAM_HOSTS.filter((h) => !hostCooling(h));
+  const hosts = [...moduHosts.map((host) => ({ host, isModu: true })), ...bfzyHosts.map((host) => ({ host, isModu: false }))];
   if (!hosts.length) return;
   let cursor = 0;
-  await Promise.all(hosts.map(async (host) => {
+  await Promise.all(hosts.map(async ({ host, isModu }) => {
     while (true) {
       const i = cursor;
       cursor += 1;
       if (i >= candidates.length) return;
       const c = candidates[i];
-      const list = await bfzySearchOnHost(host, c.title).catch(() => null);
+      if (out.has(c.key)) continue;
+      const list = await bfzySearchOnHost(host, c.title, isModu).catch(() => null);
       if (!list) continue;
       const row = list.find((v) => titleKey(v && v.vod_name) === c.key) || null;
       if (row) out.set(c.key, { row, year: c.year });
@@ -1419,7 +1649,7 @@ async function fetchRankedList(kind, pg, withPlay, year) {
   const y = parseYear(year);
   try {
     // 快照必须是 { page, pagecount, total, list } 结构，才能被查询缓存正确存取。
-    const cached = await catalogQuery(`rank:douban:v2:${kind}:${y || ''}`, TTL.list, async () => {
+    const cached = await catalogQuery(`rank:douban:v3:${kind}:${y || ''}`, TTL.list, async () => {
       const list = await fetchDoubanRankPool(kind, y);
       return { page: 1, pagecount: 1, total: list.length, list };
     });
@@ -1447,7 +1677,7 @@ async function fetchRankedListUpstream(kind, pg, withPlay, year) {
   const page = parsePage(pg);
   const y = parseYear(year);
   if (kind === 'new' && !y) {
-    const data = await fetchBfzyList({ pg: page, t: '', year: '', withPlay });
+    const data = await fetchModuList({ pg: page, t: '', year: '', withPlay });
     return {
       page,
       pagecount: Math.max(1, Number(data.pagecount) || 1),
@@ -1455,15 +1685,15 @@ async function fetchRankedListUpstream(kind, pg, withPlay, year) {
       list: data.list || [],
     };
   }
-  const ac = kind === 'hot' ? 'detail' : 'list';
   const all = [];
   const seen = new Set();
   // 榜单回退要扫多页上游，串行等于把每页的排队间隔叠起来；并发着色但保持页序稳定。
+  // 走魔都 detail 才有 vod_hits / vod_score，并顺手带上可播地址。
   const pageNos = Array.from({ length: RANK_SOURCE_PAGES }, (_, i) => i + 1);
   const pages = await Promise.all(pageNos.map((p) => {
-    const params = { ac, pg: p };
+    const params = { ac: 'detail', pg: p };
     if (y) params.year = y;
-    return upstreamJson(params, TTL.list).catch(() => null);
+    return moduJson(params, TTL.list).catch(() => null);
   }));
   for (const data of pages) {
     if (!data) continue;
@@ -1472,7 +1702,7 @@ async function fetchRankedListUpstream(kind, pg, withPlay, year) {
       if (!key || seen.has(key)) continue;
       if (y && String(item.vod_year || '') !== y) continue;
       seen.add(key);
-      all.push(item);
+      all.push({ ...item, vod_id: `${MODU_ID_PREFIX}${item.vod_id}` });
     }
   }
   const metric = kind === 'hot'
@@ -1499,7 +1729,7 @@ async function fetchRankedListUpstream(kind, pg, withPlay, year) {
 async function fetchList({ pg, t, year, withPlay }) {
   const cat = categoryParam(t);
   if (cat && cat.kind === 'headline' && RANK_KINDS.has(cat.value)) {
-    const key = `rank:${cat.value}:v3:${withPlay ? 1 : 0}:${parsePage(pg)}:${PAGE_SIZE}:${parseYear(year)}`;
+    const key = `rank:${cat.value}:v4:${withPlay ? 1 : 0}:${parsePage(pg)}:${PAGE_SIZE}:${parseYear(year)}`;
     return catalogQuery(key, TTL.list, () => fetchRankedList(cat.value, pg, withPlay, year));
   }
   return catalogQuery(listCacheKey({ pg, t, year, withPlay }), TTL.list, () => fetchListLive({ pg, t, year, withPlay }));
@@ -1528,7 +1758,7 @@ async function fetchDetail(ids) {
 async function fetchSearch(wd, pg, withPlay) {
   const page = parsePage(pg);
   const title = normalizedTitle(wd).toLowerCase();
-  const key = `search:${withPlay ? 1 : 0}:${title}:${page}`;
+  const key = `search:v2:${withPlay ? 1 : 0}:${title}:${page}`;
   return catalogQuery(
     key,
     TTL.list,
@@ -1598,6 +1828,13 @@ async function resolveKanVod(item) {
   let row = await findLocalExactVod(title);
   if (!row) {
     try {
+      const data = await fetchModuSearch(title, 1, false);
+      const candidates = Array.isArray(data.list) ? data.list : [];
+      row = candidates.find((v) => titleKey(v.vod_name) === key) || null;
+    } catch {}
+  }
+  if (!row) {
+    try {
       const data = await fetchBfzySearch(title, 1, false);
       const candidates = Array.isArray(data.list) ? data.list : [];
       row = candidates.find((v) => titleKey(v.vod_name) === key) || null;
@@ -1632,7 +1869,7 @@ async function collectKanRecommendations(section) {
 async function fetchKanRecommendations(section, limit) {
   const max = Math.max(1, Math.min(30, Number(limit) || 12));
   return catalogQuery(
-    `kan:v1:${section}:${max}`,
+    `kan:v2:${section}:${max}`,
     TTL.list,
     () => collectKanRecommendations(section).then((data) => ({ ...data, list: data.list.slice(0, max) })),
   );
@@ -1793,7 +2030,9 @@ async function fetchGuessPool(seeds, exclude) {
 async function detailForPlay(id) {
   const row = /^4kcz-\d{1,8}$/.test(id)
     ? await fetchFourkDetail(id)
-    : (await fetchBfzyDetail(id)).find((item) => String(item.vod_id) === String(id)) || null;
+    : MODU_ID_RE.test(id)
+      ? (await fetchModuDetail([id])).find((item) => String(item.vod_id) === String(id)) || null
+      : (await fetchBfzyDetail(id)).find((item) => String(item.vod_id) === String(id)) || null;
   // 采集到的详情同样回写数据库，供后续 ac=detail 直接命中。
   if (row) await saveCatalogQuery(`detail:${id}`, { page: 1, pagecount: 1, total: 1, list: [row] }, TTL.detail);
   return row;
@@ -2745,7 +2984,7 @@ async function handleRequest(req, res) {
   if (p === '/play.m3u8' || p === '/resolve') {
     const id = String(url.searchParams.get('id') || '').trim();
     const seq = String(url.searchParams.get('p') || '0').trim();
-    if (!/^(?:\d{1,10}|4kcz-\d{1,8})$/.test(id) || !/^\d{1,5}$/.test(seq)) {
+    if (!PLAY_ID_RE.test(id) || !/^\d{1,5}$/.test(seq)) {
       sendJson(res, 400, { ok: false, error: 'id/p required' });
       return;
     }
@@ -2895,7 +3134,7 @@ async function handleRequest(req, res) {
         return;
       }
       const ids = (url.searchParams.get('ids') || '').trim();
-      if (!/^(?:(?:\d{1,10}|4kcz-\d{1,8})|manual-[a-z0-9]{4,24})(?:,(?:(?:\d{1,10}|4kcz-\d{1,8})|manual-[a-z0-9]{4,24})){0,19}$/.test(ids)) {
+      if (!ID_LIST_RE.test(ids)) {
         sendJson(res, 400, { ok: false, error: 'ids is required' });
         return;
       }
@@ -2914,7 +3153,7 @@ async function handleRequest(req, res) {
     const ids = (url.searchParams.get('ids') || '').trim();
     const wd = (url.searchParams.get('wd') || '').trim();
     try {
-      if (ac === 'detail' && /^(?:(?:\d{1,10}|4kcz-\d{1,8})|manual-[a-z0-9]{4,24})(?:,(?:(?:\d{1,10}|4kcz-\d{1,8})|manual-[a-z0-9]{4,24})){0,19}$/.test(ids)) {
+      if (ac === 'detail' && ID_LIST_RE.test(ids)) {
         const rows = await fetchDetail(ids);
         sendJsonCacheable(res, 200, await publicDetailPayload(rows, base, true), { sMaxAge: 1800 });
         return;
