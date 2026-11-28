@@ -2828,7 +2828,9 @@ async function handleRequest(req, res) {
       ok: true,
       ts: Date.now(),
       store: (STORES && STORES.backend) || 'none',
-      cacheTtl: { list: TTL.list, detail: TTL.detail },
+      hasDbEnv: Boolean(process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.POSTGRES_URL_NON_POOLING || (process.env.PGHOST && process.env.PGUSER)),
+      disableDb: String(process.env.DISABLE_DB || ''),
+      dbHost: String((process.env.DATABASE_URL || process.env.POSTGRES_URL || '').replace(/:.+@/, ':***@')).slice(0, 60),      cacheTtl: { list: TTL.list, detail: TTL.detail },
     }, { sMaxAge: 10, maxAge: 5 });
     return;
   }
@@ -3307,3 +3309,4 @@ if (!isWorkers) {
     console.error('[quying] unhandledRejection:', (e && e.message) || e);
   });
 }
+
