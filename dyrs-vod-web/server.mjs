@@ -2824,7 +2824,12 @@ async function handleRequest(req, res) {
   }
 
   if (p === '/api/health') {
-    sendJsonCacheable(res, 200, { ok: true, ts: Date.now() }, { sMaxAge: 10, maxAge: 5 });
+    sendJsonCacheable(res, 200, {
+      ok: true,
+      ts: Date.now(),
+      store: (STORES && STORES.backend) || 'none',
+      cacheTtl: { list: TTL.list, detail: TTL.detail },
+    }, { sMaxAge: 10, maxAge: 5 });
     return;
   }
 
