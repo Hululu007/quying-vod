@@ -1455,7 +1455,28 @@ function scheduleCatalogRefresh(key, ttl, loader) {
   }
 }
 
+// 实例级页面缓存：没有配置数据库时也能让热实例直接返回整页，
+// 不必每次刷新都回采集源。有效期取 TTL（列表 60 分钟、详情 12 小时）。
+const PAGE_MEM = new Map();
+const PAGE_MEM_MAX = 6 * 60 * 60 * 1000;
+const PAGE_MEM_KEYS_MAX = 400;
+
+function pageMemGet(key) {
+  const entry = PAGE_MEM.get(key);
+  if (!entry) return null;
+  if (entry.exp <= Date.now()) { PAGE_MEM.delete(key); return null; }
+  return entry.value;
+}
+
+function pageMemSet(key, value, ttl) {
+  if (!value) return;
+  if (PAGE_MEM.size >= PAGE_MEM_KEYS_MAX) PAGE_MEM.clear();
+  PAGE_MEM.set(key, { value, exp: Date.now() + Math.min(Math.max(ttl, 60000), PAGE_MEM_MAX) });
+}
+
 async function catalogQuery(key, ttl, loader, localLoader) {
+  const memo = pageMemGet(key);
+  if (memo) return memo;
   const cached = await readCatalogQuery(key);
   if (cached) {
     if (!cached.stale) return cached.value;
@@ -1483,6 +1504,7 @@ async function catalogQuery(key, ttl, loader, localLoader) {
   }
   const value = await loader();
   await saveCatalogQuery(key, value, ttl);
+  pageMemSet(key, value, ttl);
   return value;
 }
 
