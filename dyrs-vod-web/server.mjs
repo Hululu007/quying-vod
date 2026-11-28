@@ -19,6 +19,8 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 //   避免 Cloudflare「I/O 对象不能跨请求复用」的限制。
 let rootCatalogStore = null;
 let rootAdminStore = null;
+let storeBackend = 'none';
+let storeInitError = '';
 const requestStores = new AsyncLocalStorage();
 
 const STORES = {
@@ -43,7 +45,8 @@ async function initNodeStores() {
       }
     }
   } catch (error) {
-    console.warn(`[quying] data store disabled: ${String(error.message || error)}`);
+    storeInitError = String((error && error.message) || error);
+    console.warn(`[quying] data store disabled: ${storeInitError}`);
   }
 }
 
